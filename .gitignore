@@ -46,4 +46,29 @@ __pycache__/
 *.tgz
 *.rar
 *.7z
-*.gz
+*.gzmodel-weights/*.pth
+experiments/exp*_outputs/
+ir_models/
+
+# Large data caches (added 2026-04-27)
+*.npz
+*.npy
+*.parquet
+*.arrow
+# Model weight directories
+model-weights/
+# Experiment output directories (already partially covered; restate for clarity)
+experiments/_audits_post_v26/exp*_outputs/
+experiments/_archive_*/outputs/
+experiments/_data_pipelines/exp*_outputs/
+# External downloaded audio (large)
+data/external/
+# Perch backbone (big binary)
+perch_v2/
+# Scratch logs
+experiments/_scratch_logs/
+
+# Paper repo (separate git repo for iVDFM thesis-related)
+iVDFM/
+# Example/discussion external content
+example_and_discussion/

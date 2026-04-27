@@ -1,0 +1,870 @@
+"""
+BirdCLEF+ 2026 — v7: v1 baseline (LB 0.910) + SED29 z-score blend.
+v5 (priors OFF) scored LB 0.891 (−0.019 vs v1). OOF analysis misled us: priors cover
+unmapped classes in LB that aren't active in our 59-file val set.
+Pipeline: Perch v2 + priors + PCA32+LogReg probes + z-score blend with HGNetV2-B0 SED
+          (exp29, Val-A 0.737) + Gauss post-blend smoothing.
+Local Val-A: 0.9061 (+0.012 from SED blend). Target LB 0.92-0.93.
+"""
+import os, platform, sys, time
+
+_WALL_START = time.time()
+print('Python :', sys.version)
+print('OS     :', platform.system(), platform.release())
+print('CWD    :', os.getcwd())
+
+# ── Install TF 2.20 from wheels ──────────────────────────────────────────────
+import subprocess
+from pathlib import Path
+
+_WHL_CANDIDATES = [
+    Path('/kaggle/input/notebooks/kdmitrie/bc26-tensorflow-2-20-0/wheel'),
+    Path('/kaggle/input/notebooks/kdmitrie/bc26-tensorflow-2-20-0'),
+    Path('/kaggle/input/notebooks/ashok205/tf-wheels/tf_wheels'),
+    Path('/kaggle/input/notebooks/ashok205/tf-wheels'),
+]
+
+_WHL = None
+for candidate in _WHL_CANDIDATES:
+    if (candidate / 'tensorboard-2.20.0-py3-none-any.whl').exists():
+        _WHL = candidate
+        break
+
+if _WHL is not None:
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '--no-deps',
+        str(_WHL / 'tensorboard-2.20.0-py3-none-any.whl')], check=True)
+    tf_whls = list(_WHL.glob('tensorflow-2.20.0*.whl'))
+    if tf_whls:
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '--no-deps',
+            str(tf_whls[0])], check=True)
+    print(f'Installed TF 2.20.0 from wheels at {_WHL}')
+else:
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '-q',
+        'tensorflow==2.20.0', 'tensorboard==2.20.0'], check=True)
+    print('Installed TF 2.20.0 from PyPI.')
+
+# ── Imports ───────────────────────────────────────────────────────────────────
+import gc
+import random
+import re
+import warnings
+
+import numpy as np
+import pandas as pd
+import soundfile as sf
+import tensorflow as tf
+
+from scipy.ndimage import convolve1d
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import GroupKFold
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from tqdm.auto import tqdm
+
+warnings.filterwarnings('ignore')
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = ''  # force CPU
+tf.experimental.numpy.experimental_enable_numpy_behavior()
+
+print(f'TensorFlow : {tf.__version__}')
+print(f'Wall time  : {time.time() - _WALL_START:.0f}s (after TF install)')
+
+# ── Config ────────────────────────────────────────────────────────────────────
+_KAGGLE_BASE = Path('/kaggle/input/competitions/birdclef-2026')
+_LOCAL_BASE  = Path('/data/birdclef2026/data/birdclef-2026')
+BASE = _KAGGLE_BASE if _KAGGLE_BASE.exists() else _LOCAL_BASE
+
+MODEL_DIR = Path(
+    '/kaggle/input/models/google/bird-vocalization-classifier'
+    '/tensorflow2/perch_v2_cpu/1'
+)
+
+# Cache: check multiple possible mount paths
+_CACHE_CANDIDATES = [
+    Path('/kaggle/input/datasets/jaejohn/perch-meta'),   # newer Kaggle format
+    Path('/kaggle/input/perch-meta'),                      # older format
+    Path('/kaggle/working/cache'),                         # freshly generated
+]
+CACHE_DIR = next(
+    (d for d in _CACHE_CANDIDATES
+     if (d / 'full_perch_meta.parquet').exists()
+     and (d / 'full_perch_arrays.npz').exists()),
+    None,
+)
+WORK_CACHE = Path('/kaggle/working/cache')
+WORK_CACHE.mkdir(parents=True, exist_ok=True)
+
+SR             = 32_000
+WINDOW_SEC     = 5
+WINDOW_SAMPLES = SR * WINDOW_SEC
+FILE_SAMPLES   = 60 * SR
+N_WINDOWS      = 12
+BATCH_FILES    = 16  # matches v1 LB 0.910 config; batch=32 dev wall 311s exceeded 200s threshold
+DRYRUN_N_FILES = 20
+
+# Prior fusion — v1 config (LB 0.910 frozen)
+LAMBDA_EVENT         = 0.4
+LAMBDA_TEXTURE       = 1.0
+LAMBDA_PROXY_TEXTURE = 0.8
+SMOOTH_TEXTURE_ALPHA = 0.35
+
+# Embedding probe — v1 LB 0.910 config
+PROBE_PCA_DIM = 32
+PROBE_MIN_POS = 5
+PROBE_C       = 0.25
+PROBE_ALPHA   = 0.40  # v1 exact
+USE_MLP_PROBES = False
+RANK_AWARE_POWER = 1.0  # identity (no transform)
+TTA_SHIFTS = [0]  # no TTA — saves ~60min on Kaggle CPU
+
+# SED29 blend — exp34 local best: α=0.80 Perch + 0.20 SED29 (z-scored) + Gauss σ=0.5
+USE_SED_BLEND = True
+SED_CKPT_PATHS = [
+    Path('/kaggle/input/datasets/ultimatumgame/birdclef2026-model-weights/exp29_hgnet_sed.pt'),
+    Path('/kaggle/input/birdclef2026-model-weights/exp29_hgnet_sed.pt'),
+    Path('/data/birdclef2026/model-weights/exp29_hgnet_sed.pt'),
+]
+SED_CKPT = next((p for p in SED_CKPT_PATHS if p.exists()), None)
+SED_BLEND_ALPHA = 0.80  # Perch weight
+POST_BLEND_GAUSS_SIGMA = 0.5
+
+SEED = 42
+random.seed(SEED)
+os.environ['PYTHONHASHSEED'] = str(SEED)
+np.random.seed(SEED)
+
+print(f'BASE      : {BASE}')
+print(f'CACHE_DIR : {CACHE_DIR}')
+
+# ── Load metadata ─────────────────────────────────────────────────────────────
+taxonomy       = pd.read_csv(BASE / 'taxonomy.csv')
+train_meta     = pd.read_csv(BASE / 'train.csv')
+soundscape_raw = pd.read_csv(BASE / 'train_soundscapes_labels.csv')
+sample_sub     = pd.read_csv(BASE / 'sample_submission.csv')
+
+soundscape_lbls = soundscape_raw.drop_duplicates().reset_index(drop=True)
+
+PRIMARY_LABELS = sample_sub.columns[1:].tolist()
+N_CLASSES      = len(PRIMARY_LABELS)
+label_to_idx   = {c: i for i, c in enumerate(PRIMARY_LABELS)}
+
+print(f'taxonomy species   : {len(taxonomy)}')
+print(f'train recordings   : {len(train_meta):,}')
+print(f'soundscape rows    : {len(soundscape_lbls):,}')
+print(f'submission classes  : {N_CLASSES}')
+
+# ── Parse soundscape labels ───────────────────────────────────────────────────
+FNAME_RE = re.compile(r'BC2026_(?:Train|Test)_(\d+)_(S\d+)_(\d{8})_(\d{6})\.ogg')
+
+def parse_labels(x):
+    if pd.isna(x): return []
+    return [t.strip() for t in str(x).split(';') if t.strip()]
+
+def union_labels(series):
+    return sorted(set(lbl for x in series for lbl in parse_labels(x)))
+
+def parse_soundscape_filename(name):
+    m = FNAME_RE.match(name)
+    if not m: return {'site': None, 'hour_utc': -1}
+    _, site, _, hms = m.groups()
+    return {'site': site, 'hour_utc': int(hms[:2])}
+
+sc_clean = (
+    soundscape_lbls
+    .groupby(['filename', 'start', 'end'])['primary_label']
+    .apply(union_labels)
+    .reset_index(name='label_list')
+)
+sc_clean['end_sec'] = pd.to_timedelta(sc_clean['end']).dt.total_seconds().astype(int)
+sc_clean['row_id']  = (
+    sc_clean['filename'].str.replace('.ogg', '', regex=False)
+    + '_' + sc_clean['end_sec'].astype(str)
+)
+meta_cols = sc_clean['filename'].apply(parse_soundscape_filename).apply(pd.Series)
+sc_clean  = pd.concat([sc_clean, meta_cols], axis=1)
+
+wpf        = sc_clean.groupby('filename').size()
+full_files = sorted(wpf[wpf == N_WINDOWS].index.tolist())
+sc_clean['file_fully_labeled'] = sc_clean['filename'].isin(full_files)
+
+Y_SC = np.zeros((len(sc_clean), N_CLASSES), dtype=np.uint8)
+for i, labels in enumerate(sc_clean['label_list']):
+    for lbl in labels:
+        if lbl in label_to_idx:
+            Y_SC[i, label_to_idx[lbl]] = 1
+
+full_truth = (
+    sc_clean[sc_clean['file_fully_labeled']]
+    .sort_values(['filename', 'end_sec'])
+    .reset_index(drop=False)
+)
+Y_FULL_TRUTH = Y_SC[full_truth['index'].to_numpy()]
+
+print(f'Fully-labeled files : {len(full_files)}')
+print(f'Trusted windows     : {len(full_truth)}')
+print(f'Active classes      : {int((Y_FULL_TRUTH.sum(axis=0) > 0).sum())}')
+print(f'Wall time           : {time.time() - _WALL_START:.0f}s')
+
+# ── Load Perch v2 model ──────────────────────────────────────────────────────
+print('Loading Perch model...')
+birdclassifier = tf.saved_model.load(str(MODEL_DIR))
+infer_fn       = birdclassifier.signatures['serving_default']
+print('Perch loaded.')
+
+bc_labels = (
+    pd.read_csv(MODEL_DIR / 'assets' / 'labels.csv')
+    .reset_index()
+    .rename(columns={'index': 'bc_index', 'inat2024_fsd50k': 'scientific_name'})
+)
+NO_LABEL_INDEX = len(bc_labels)
+
+taxonomy_ = taxonomy.copy()
+taxonomy_['scientific_name'] = taxonomy_['scientific_name'].astype(str)
+mapping = taxonomy_.merge(
+    bc_labels[['scientific_name', 'bc_index']],
+    on='scientific_name', how='left'
+)
+mapping['bc_index'] = mapping['bc_index'].fillna(NO_LABEL_INDEX).astype(int)
+
+label_to_bc   = mapping.set_index('primary_label')['bc_index']
+BC_INDICES    = np.array([int(label_to_bc.loc[c]) for c in PRIMARY_LABELS], dtype=np.int32)
+
+MAPPED_MASK       = BC_INDICES != NO_LABEL_INDEX
+MAPPED_POS        = np.where(MAPPED_MASK)[0].astype(np.int32)
+UNMAPPED_POS      = np.where(~MAPPED_MASK)[0].astype(np.int32)
+MAPPED_BC_INDICES = BC_INDICES[MAPPED_MASK].astype(np.int32)
+
+print(f'Mapped   : {MAPPED_MASK.sum()} / {N_CLASSES}')
+print(f'Unmapped : {(~MAPPED_MASK).sum()}')
+print(f'Wall time: {time.time() - _WALL_START:.0f}s')
+
+# ── Class taxonomy and proxy mapping ─────────────────────────────────────────
+CLASS_NAME_MAP = taxonomy_.set_index('primary_label')['class_name'].to_dict()
+TEXTURE_TAXA   = {'Amphibia', 'Insecta'}
+ACTIVE_CLASSES = [PRIMARY_LABELS[i] for i in np.where(Y_SC.sum(axis=0) > 0)[0]]
+
+idx_active_texture = np.array(
+    [label_to_idx[c] for c in ACTIVE_CLASSES if CLASS_NAME_MAP.get(c) in TEXTURE_TAXA],
+    dtype=np.int32
+)
+idx_active_event = np.array(
+    [label_to_idx[c] for c in ACTIVE_CLASSES if CLASS_NAME_MAP.get(c) not in TEXTURE_TAXA],
+    dtype=np.int32
+)
+
+idx_mapped_active_texture    = idx_active_texture[MAPPED_MASK[idx_active_texture]]
+idx_mapped_active_event      = idx_active_event[MAPPED_MASK[idx_active_event]]
+idx_unmapped_active_texture  = idx_active_texture[~MAPPED_MASK[idx_active_texture]]
+idx_unmapped_active_event    = idx_active_event[~MAPPED_MASK[idx_active_event]]
+idx_unmapped_inactive = np.array(
+    [i for i in UNMAPPED_POS if PRIMARY_LABELS[i] not in ACTIVE_CLASSES], dtype=np.int32
+)
+
+# Genus proxies for unmapped Amphibia
+unmapped_df = mapping[mapping['bc_index'] == NO_LABEL_INDEX].copy()
+unmapped_non_sonotype = unmapped_df[
+    ~unmapped_df['primary_label'].astype(str).str.contains('son', na=False)
+].copy()
+
+proxy_map = {}
+for _, row in unmapped_non_sonotype.iterrows():
+    genus = str(row['scientific_name']).split()[0]
+    hits  = bc_labels[
+        bc_labels['scientific_name'].str.match(rf'^{re.escape(genus)}\s', na=False)
+    ]
+    if len(hits) > 0:
+        proxy_map[str(row['primary_label'])] = hits['bc_index'].astype(int).tolist()
+
+SELECTED_PROXY_TARGETS   = sorted([t for t in proxy_map if CLASS_NAME_MAP.get(t) == 'Amphibia'])
+selected_proxy_pos       = np.array([label_to_idx[c] for c in SELECTED_PROXY_TARGETS], dtype=np.int32)
+selected_proxy_pos_to_bc = {
+    label_to_idx[t]: np.array(proxy_map[t], dtype=np.int32) for t in SELECTED_PROXY_TARGETS
+}
+
+idx_selected_proxy_active_texture    = np.intersect1d(selected_proxy_pos, idx_active_texture)
+idx_selected_prioronly_active_texture = np.setdiff1d(idx_unmapped_active_texture, selected_proxy_pos)
+idx_selected_prioronly_active_event   = np.setdiff1d(idx_unmapped_active_event, selected_proxy_pos)
+
+print(f'Frog proxy targets : {SELECTED_PROXY_TARGETS}')
+
+# ── Perch inference engine ────────────────────────────────────────────────────
+def read_soundscape_60s(path):
+    y, sr = sf.read(path, dtype='float32', always_2d=False)
+    if y.ndim == 2:
+        y = y.mean(axis=1)
+    if len(y) < FILE_SAMPLES:
+        y = np.pad(y, (0, FILE_SAMPLES - len(y)))
+    return y[:FILE_SAMPLES]
+
+
+def infer_perch_batch(paths, verbose=True):
+    paths   = [Path(p) for p in paths]
+    n_files = len(paths)
+    n_rows  = n_files * N_WINDOWS
+
+    row_ids    = np.empty(n_rows, dtype=object)
+    filenames  = np.empty(n_rows, dtype=object)
+    sites      = np.empty(n_rows, dtype=object)
+    hours      = np.empty(n_rows, dtype=np.int16)
+    scores     = np.zeros((n_rows, N_CLASSES), dtype=np.float32)
+    embeddings = np.zeros((n_rows, 1536),      dtype=np.float32)
+
+    write_row = 0
+    itr = tqdm(range(0, n_files, BATCH_FILES), desc='Perch', disable=not verbose)
+
+    for start in itr:
+        batch  = paths[start:start + BATCH_FILES]
+        bn     = len(batch)
+        x      = np.empty((bn * N_WINDOWS, WINDOW_SAMPLES), dtype=np.float32)
+        bstart = write_row
+
+        for bi, path in enumerate(batch):
+            audio = read_soundscape_60s(path)
+            x[bi * N_WINDOWS:(bi + 1) * N_WINDOWS] = audio.reshape(
+                N_WINDOWS, WINDOW_SAMPLES
+            )
+            meta = parse_soundscape_filename(path.name)
+            row_ids[write_row:write_row + N_WINDOWS]   = [
+                f'{path.stem}_{t}' for t in range(5, 65, 5)
+            ]
+            filenames[write_row:write_row + N_WINDOWS] = path.name
+            sites[write_row:write_row + N_WINDOWS]     = meta['site']
+            hours[write_row:write_row + N_WINDOWS]     = meta['hour_utc']
+            write_row += N_WINDOWS
+
+        out    = infer_fn(inputs=tf.convert_to_tensor(x))
+        logits = out['label'].numpy().astype(np.float32)
+        emb    = out['embedding'].numpy().astype(np.float32)
+
+        scores[bstart:write_row, MAPPED_POS] = logits[:write_row - bstart, MAPPED_BC_INDICES]
+        embeddings[bstart:write_row]          = emb
+
+        for pos, bc_idx_arr in selected_proxy_pos_to_bc.items():
+            scores[bstart:write_row, pos] = logits[:write_row - bstart, bc_idx_arr].max(axis=1)
+
+        del x, out, logits, emb
+        gc.collect()
+
+    meta_df = pd.DataFrame({
+        'row_id': row_ids, 'filename': filenames,
+        'site': sites, 'hour_utc': hours,
+    })
+    return meta_df, scores, embeddings
+
+
+# ── Load or compute training Perch cache ──────────────────────────────────────
+if CACHE_DIR is not None:
+    print(f'Loading Perch cache from: {CACHE_DIR}')
+    meta_full       = pd.read_parquet(CACHE_DIR / 'full_perch_meta.parquet')
+    arr             = np.load(CACHE_DIR / 'full_perch_arrays.npz')
+    scores_full_raw = arr['scores_full_raw'].astype(np.float32)
+    emb_full        = arr['emb_full'].astype(np.float32)
+else:
+    print('No cache found. Running Perch on fully-labeled training soundscapes...')
+    full_paths = [BASE / 'train_soundscapes' / fn for fn in full_files]
+    meta_full, scores_full_raw, emb_full = infer_perch_batch(full_paths)
+    meta_full.to_parquet(WORK_CACHE / 'full_perch_meta.parquet', index=False)
+    np.savez_compressed(
+        WORK_CACHE / 'full_perch_arrays.npz',
+        scores_full_raw=scores_full_raw,
+        emb_full=emb_full,
+    )
+    print(f'Cache saved to {WORK_CACHE}')
+
+full_truth_aligned = (
+    full_truth.set_index('row_id')
+    .loc[meta_full['row_id']]
+    .reset_index(drop=False)
+)
+Y_FULL = Y_SC[full_truth_aligned['index'].to_numpy()]
+
+print(f'scores_full_raw : {scores_full_raw.shape}  {scores_full_raw.dtype}')
+print(f'emb_full        : {emb_full.shape}  {emb_full.dtype}')
+print(f'Y_FULL          : {Y_FULL.shape}')
+print(f'Wall time       : {time.time() - _WALL_START:.0f}s')
+
+# ── Prior tables and fusion ───────────────────────────────────────────────────
+def fit_prior_tables(prior_df, Y_prior):
+    prior_df = prior_df.reset_index(drop=True)
+    global_p = Y_prior.mean(axis=0).astype(np.float32)
+
+    site_keys = sorted(prior_df['site'].dropna().astype(str).unique())
+    hour_keys = sorted(prior_df['hour_utc'].dropna().astype(int).unique())
+
+    site_to_i, site_n, site_p = {}, [], []
+    for s in site_keys:
+        mask = prior_df['site'].astype(str).values == s
+        site_to_i[s] = len(site_n)
+        site_n.append(mask.sum())
+        site_p.append(Y_prior[mask].mean(axis=0))
+    site_n = np.array(site_n, dtype=np.float32)
+    site_p = np.stack(site_p).astype(np.float32) if site_p else np.zeros((0, Y_prior.shape[1]), np.float32)
+
+    hour_to_i, hour_n, hour_p = {}, [], []
+    for h in hour_keys:
+        mask = prior_df['hour_utc'].astype(int).values == h
+        hour_to_i[h] = len(hour_n)
+        hour_n.append(mask.sum())
+        hour_p.append(Y_prior[mask].mean(axis=0))
+    hour_n = np.array(hour_n, dtype=np.float32)
+    hour_p = np.stack(hour_p).astype(np.float32) if hour_p else np.zeros((0, Y_prior.shape[1]), np.float32)
+
+    sh_to_i, sh_n_list, sh_p_list = {}, [], []
+    for (s, h), idx in prior_df.groupby(['site', 'hour_utc']).groups.items():
+        sh_to_i[(str(s), int(h))] = len(sh_n_list)
+        idx = np.array(list(idx))
+        sh_n_list.append(len(idx))
+        sh_p_list.append(Y_prior[idx].mean(axis=0))
+    sh_n = np.array(sh_n_list, dtype=np.float32)
+    sh_p = np.stack(sh_p_list).astype(np.float32) if sh_p_list else np.zeros((0, Y_prior.shape[1]), np.float32)
+
+    return dict(
+        global_p=global_p,
+        site_to_i=site_to_i, site_n=site_n, site_p=site_p,
+        hour_to_i=hour_to_i, hour_n=hour_n, hour_p=hour_p,
+        sh_to_i=sh_to_i,     sh_n=sh_n,     sh_p=sh_p,
+    )
+
+
+def prior_logits(sites, hours, tables, eps=1e-4):
+    n = len(sites)
+    p = np.repeat(tables['global_p'][None, :], n, axis=0).astype(np.float32, copy=True)
+
+    si  = np.fromiter((tables['site_to_i'].get(str(s), -1) for s in sites), np.int32, n)
+    hi  = np.fromiter(
+        (tables['hour_to_i'].get(int(h), -1) if int(h) >= 0 else -1 for h in hours),
+        np.int32, n
+    )
+    shi = np.fromiter(
+        (tables['sh_to_i'].get((str(s), int(h)), -1) if int(h) >= 0 else -1
+         for s, h in zip(sites, hours)),
+        np.int32, n
+    )
+
+    valid = hi >= 0
+    if valid.any():
+        nh = tables['hour_n'][hi[valid]][:, None]
+        p[valid] = nh / (nh + 8.0) * tables['hour_p'][hi[valid]] + (1.0 - nh / (nh + 8.0)) * p[valid]
+
+    valid = si >= 0
+    if valid.any():
+        ns = tables['site_n'][si[valid]][:, None]
+        p[valid] = ns / (ns + 8.0) * tables['site_p'][si[valid]] + (1.0 - ns / (ns + 8.0)) * p[valid]
+
+    valid = shi >= 0
+    if valid.any():
+        nsh = tables['sh_n'][shi[valid]][:, None]
+        p[valid] = nsh / (nsh + 4.0) * tables['sh_p'][shi[valid]] + (1.0 - nsh / (nsh + 4.0)) * p[valid]
+
+    np.clip(p, eps, 1.0 - eps, out=p)
+    return (np.log(p) - np.log1p(-p)).astype(np.float32)
+
+
+def smooth_cols(scores, cols, alpha=0.35):
+    if alpha <= 0 or len(cols) == 0:
+        return scores.copy()
+    s    = scores.copy()
+    view = s.reshape(-1, N_WINDOWS, s.shape[1])
+    x    = view[:, :, cols]
+    prev = np.concatenate([x[:, :1, :], x[:, :-1, :]], axis=1)
+    nxt  = np.concatenate([x[:, 1:, :], x[:, -1:, :]], axis=1)
+    view[:, :, cols] = (1.0 - alpha) * x + 0.5 * alpha * (prev + nxt)
+    return s
+
+
+def fuse_scores(base, sites, hours, tables):
+    scores = base.copy()
+    prior  = prior_logits(sites, hours, tables)
+
+    if len(idx_mapped_active_event):
+        scores[:, idx_mapped_active_event] += LAMBDA_EVENT * prior[:, idx_mapped_active_event]
+    if len(idx_mapped_active_texture):
+        scores[:, idx_mapped_active_texture] += LAMBDA_TEXTURE * prior[:, idx_mapped_active_texture]
+    if len(idx_selected_proxy_active_texture):
+        scores[:, idx_selected_proxy_active_texture] += (
+            LAMBDA_PROXY_TEXTURE * prior[:, idx_selected_proxy_active_texture]
+        )
+    # Prior-only classes (unmapped, no genus proxy): no Perch signal AND priors disabled,
+    # set to low constant; probe will overwrite if it has positives in training set.
+    if len(idx_selected_prioronly_active_event):
+        if LAMBDA_EVENT > 0:
+            scores[:, idx_selected_prioronly_active_event] = (
+                LAMBDA_EVENT * prior[:, idx_selected_prioronly_active_event]
+            )
+        else:
+            scores[:, idx_selected_prioronly_active_event] = -8.0
+    if len(idx_selected_prioronly_active_texture):
+        if LAMBDA_TEXTURE > 0:
+            scores[:, idx_selected_prioronly_active_texture] = (
+                LAMBDA_TEXTURE * prior[:, idx_selected_prioronly_active_texture]
+            )
+        else:
+            scores[:, idx_selected_prioronly_active_texture] = -8.0
+    if len(idx_unmapped_inactive):
+        scores[:, idx_unmapped_inactive] = -8.0
+
+    scores = smooth_cols(scores, idx_active_texture, alpha=SMOOTH_TEXTURE_ALPHA)
+    return scores.astype(np.float32), prior
+
+
+# ── OOF baseline ──────────────────────────────────────────────────────────────
+def macro_auc(y_true, y_score):
+    keep = y_true.sum(axis=0) > 0
+    return roc_auc_score(y_true[:, keep], y_score[:, keep], average='macro')
+
+gkf    = GroupKFold(n_splits=5)
+groups = meta_full['site'].to_numpy()
+
+oof_base  = np.zeros_like(scores_full_raw, dtype=np.float32)
+oof_prior = np.zeros_like(scores_full_raw, dtype=np.float32)
+
+for _, va_idx in tqdm(list(gkf.split(scores_full_raw, groups=groups)), desc='OOF folds'):
+    va_idx    = np.sort(va_idx)
+    val_sites = set(meta_full.iloc[va_idx]['site'].tolist())
+    prior_m   = ~sc_clean['site'].isin(val_sites).values
+    tables    = fit_prior_tables(
+        sc_clean.loc[prior_m].reset_index(drop=True), Y_SC[prior_m]
+    )
+    oof_base[va_idx], oof_prior[va_idx] = fuse_scores(
+        scores_full_raw[va_idx],
+        meta_full.iloc[va_idx]['site'].to_numpy(),
+        meta_full.iloc[va_idx]['hour_utc'].to_numpy(),
+        tables,
+    )
+
+baseline_oof_auc = macro_auc(Y_FULL, oof_base)
+print(f'OOF baseline AUC (prior fusion only): {baseline_oof_auc:.6f}')
+print(f'Wall time: {time.time() - _WALL_START:.0f}s')
+
+# ── Embedding probes ─────────────────────────────────────────────────────────
+def seq_features_1d(v):
+    x    = v.reshape(-1, N_WINDOWS)
+    prev = np.concatenate([x[:, :1], x[:, :-1]], axis=1).reshape(-1)
+    nxt  = np.concatenate([x[:, 1:], x[:, -1:]], axis=1).reshape(-1)
+    return prev, nxt, np.repeat(x.mean(1), N_WINDOWS), np.repeat(x.max(1), N_WINDOWS)
+
+
+def build_class_features(Z, raw_col, prior_col, base_col):
+    """v1 LB 0.910: PCA + raw + prior + base + seq features (prev/next/mean/max)."""
+    p, n, m, mx = seq_features_1d(base_col)
+    return np.concatenate(
+        [Z, raw_col[:, None], prior_col[:, None], base_col[:, None],
+         p[:, None], n[:, None], m[:, None], mx[:, None]],
+        axis=1
+    ).astype(np.float32)
+
+
+emb_scaler = StandardScaler()
+emb_scaled = emb_scaler.fit_transform(emb_full)
+
+n_comp = min(PROBE_PCA_DIM, emb_scaled.shape[0] - 1, emb_scaled.shape[1])
+emb_pca = PCA(n_components=n_comp)
+Z_FULL  = emb_pca.fit_transform(emb_scaled).astype(np.float32)
+
+print(f'PCA components : {n_comp}')
+print(f'Explained var  : {emb_pca.explained_variance_ratio_.sum():.4f}')
+
+# Train probes: LogReg + optional MLP
+pos_counts   = Y_FULL.sum(axis=0)
+probe_idx    = np.where(pos_counts >= PROBE_MIN_POS)[0].astype(np.int32)
+probe_models = {}
+mlp_models   = {}
+
+for cls_idx in tqdm(probe_idx, desc='Training probes'):
+    y = Y_FULL[:, cls_idx]
+    if y.sum() == 0 or y.sum() == len(y):
+        continue
+    X = build_class_features(
+        Z_FULL,
+        raw_col=scores_full_raw[:, cls_idx],
+        prior_col=oof_prior[:, cls_idx],
+        base_col=oof_base[:, cls_idx],
+    )
+    clf = LogisticRegression(
+        C=PROBE_C, max_iter=400, solver='liblinear', class_weight='balanced'
+    )
+    clf.fit(X, y)
+    probe_models[cls_idx] = clf
+
+    if USE_MLP_PROBES and y.sum() >= 10:
+        mlp = MLPClassifier(
+            hidden_layer_sizes=(128,), max_iter=300,
+            learning_rate_init=5e-4, alpha=0.01,
+            early_stopping=True, validation_fraction=0.15,
+            random_state=SEED
+        )
+        mlp.fit(X, y)
+        mlp_models[cls_idx] = mlp
+
+print(f'LogReg probes : {len(probe_models)} / {N_CLASSES} classes')
+print(f'MLP probes    : {len(mlp_models)} / {N_CLASSES} classes')
+print(f'Wall time: {time.time() - _WALL_START:.0f}s')
+
+# ── Test inference ────────────────────────────────────────────────────────────
+final_tables = fit_prior_tables(sc_clean.reset_index(drop=True), Y_SC)
+
+test_paths = sorted((BASE / 'test_soundscapes').glob('*.ogg'))
+if len(test_paths) == 0:
+    print(f'No test soundscapes found. Dry-run on {DRYRUN_N_FILES} train files.')
+    test_paths = sorted((BASE / 'train_soundscapes').glob('*.ogg'))[:DRYRUN_N_FILES]
+else:
+    print(f'Test files : {len(test_paths)}')
+
+# TTA: run Perch with shifted windows, then average
+def infer_perch_tta(paths, shifts, verbose=True):
+    """Run Perch with time-shifted windows and average results."""
+    all_scores = []
+    all_embs = []
+    meta_ref = None
+
+    for shift in shifts:
+        if shift == 0:
+            meta_s, scores_s, emb_s = infer_perch_batch(paths, verbose=verbose)
+            meta_ref = meta_s
+        else:
+            # Shifted inference: read audio, shift by shift*WINDOW_SEC seconds, re-window
+            paths_list = [Path(p) for p in paths]
+            n_files = len(paths_list)
+            n_rows = n_files * N_WINDOWS
+            scores_s = np.zeros((n_rows, N_CLASSES), dtype=np.float32)
+            emb_s = np.zeros((n_rows, 1536), dtype=np.float32)
+            write_row = 0
+
+            for start in range(0, n_files, BATCH_FILES):
+                batch = paths_list[start:start + BATCH_FILES]
+                bn = len(batch)
+                x = np.empty((bn * N_WINDOWS, WINDOW_SAMPLES), dtype=np.float32)
+
+                for bi, path in enumerate(batch):
+                    audio = read_soundscape_60s(path)
+                    # Circular shift by shift windows
+                    shift_samples = shift * WINDOW_SAMPLES
+                    audio_shifted = np.roll(audio, shift_samples)
+                    x[bi * N_WINDOWS:(bi + 1) * N_WINDOWS] = audio_shifted.reshape(
+                        N_WINDOWS, WINDOW_SAMPLES
+                    )
+                    write_row += N_WINDOWS
+
+                out = infer_fn(inputs=tf.convert_to_tensor(x))
+                logits = out['label'].numpy().astype(np.float32)
+                emb = out['embedding'].numpy().astype(np.float32)
+
+                bstart = start * N_WINDOWS
+                bend = bstart + bn * N_WINDOWS
+                scores_s[bstart:bend, MAPPED_POS] = logits[:bn * N_WINDOWS, MAPPED_BC_INDICES]
+                emb_s[bstart:bend] = emb[:bn * N_WINDOWS]
+
+                for pos, bc_idx_arr in selected_proxy_pos_to_bc.items():
+                    scores_s[bstart:bend, pos] = logits[:bn * N_WINDOWS, bc_idx_arr].max(axis=1)
+
+                del x, out, logits, emb
+                gc.collect()
+
+            meta_s = meta_ref  # reuse metadata from shift=0
+
+        all_scores.append(scores_s)
+        all_embs.append(emb_s)
+        if verbose:
+            print(f'TTA shift={shift}: done')
+
+    avg_scores = np.mean(all_scores, axis=0).astype(np.float32)
+    avg_embs = np.mean(all_embs, axis=0).astype(np.float32)
+    return meta_ref, avg_scores, avg_embs
+
+meta_test, scores_test_raw, emb_test = infer_perch_tta(test_paths, TTA_SHIFTS)
+print(f'TTA shifts: {TTA_SHIFTS}')
+
+# Prior fusion
+test_base, test_prior = fuse_scores(
+    scores_test_raw,
+    meta_test['site'].to_numpy(),
+    meta_test['hour_utc'].to_numpy(),
+    final_tables,
+)
+
+# PCA projection
+Z_TEST = emb_pca.transform(emb_scaler.transform(emb_test)).astype(np.float32)
+
+# Apply probes with per-class alpha (LogReg + MLP ensemble)
+final_scores = test_base.copy()
+for cls_idx, clf in tqdm(probe_models.items(), desc='Applying probes'):
+    X = build_class_features(
+        Z_TEST,
+        raw_col=scores_test_raw[:, cls_idx],
+        prior_col=test_prior[:, cls_idx],
+        base_col=test_base[:, cls_idx],
+    )
+    pred_lr = clf.decision_function(X).astype(np.float32)
+
+    # MLP ensemble: average LogReg and MLP predictions
+    if cls_idx in mlp_models:
+        pred_mlp = mlp_models[cls_idx].predict_proba(X)[:, 1].astype(np.float32)
+        # Convert MLP prob to logit-like scale for blending
+        pred_mlp = np.log(np.clip(pred_mlp, 1e-6, 1 - 1e-6) /
+                          np.clip(1 - pred_mlp, 1e-6, 1 - 1e-6))
+        pred = 0.6 * pred_lr + 0.4 * pred_mlp
+    else:
+        pred = pred_lr
+
+    # Fixed 50/50 blend with raw-Perch base (matches exp26 R1 OOF 0.815)
+    final_scores[:, cls_idx] = (
+        (1.0 - PROBE_ALPHA) * test_base[:, cls_idx]
+        + PROBE_ALPHA * pred
+    )
+
+print(f'final_scores : {final_scores.shape}')
+print(f'Score range  : {final_scores.min():.3f} to {final_scores.max():.3f}')
+
+# ── SED29 z-score blend ──────────────────────────────────────────────────────
+if USE_SED_BLEND and SED_CKPT is not None and SED_CKPT.exists():
+    print(f'\nSED29 blend: ckpt = {SED_CKPT}')
+    import torch
+    import torch.nn as nn
+    import torchaudio
+    import timm
+
+    SED_N_MELS = 128
+    SED_N_FFT = 2048
+    SED_HOP = 512
+    SED_FMIN, SED_FMAX = 50, 14000
+    SED_CHUNK_SEC = 20
+    SED_CHUNK_SAMPLES = SR * SED_CHUNK_SEC
+
+    class _MelExtractor(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mel = torchaudio.transforms.MelSpectrogram(
+                sample_rate=SR, n_fft=SED_N_FFT, hop_length=SED_HOP, n_mels=SED_N_MELS,
+                f_min=SED_FMIN, f_max=SED_FMAX, power=2.0, center=True)
+            self.adb = torchaudio.transforms.AmplitudeToDB(stype='power', top_db=80)
+        def forward(self, x):
+            m = self.mel(x); m = self.adb(m); return m.unsqueeze(1)
+
+    class _SEDHead(nn.Module):
+        def __init__(self, feat_dim, n_classes):
+            super().__init__()
+            self.att = nn.Conv1d(feat_dim, n_classes, 1)
+            self.cla = nn.Conv1d(feat_dim, n_classes, 1)
+        def forward(self, x):
+            a = self.att(x); c = self.cla(x)
+            w = torch.softmax(a, dim=-1)
+            return (w * c).sum(-1), c.max(-1).values
+
+    class _SEDModel(nn.Module):
+        def __init__(self, backbone_name='hgnetv2_b0.ssld_stage2_ft_in1k', n_classes=234):
+            super().__init__()
+            self.mel = _MelExtractor()
+            self.bn0 = nn.BatchNorm2d(SED_N_MELS)
+            self.backbone = timm.create_model(
+                backbone_name, pretrained=False, in_chans=1, num_classes=0, global_pool='')
+            with torch.no_grad():
+                feat = self.backbone(torch.zeros(1, 1, SED_N_MELS, 100))
+            self.head = _SEDHead(feat.shape[1], n_classes)
+        def forward(self, x):
+            m = self.mel(x)
+            m = m.transpose(1, 2); m = self.bn0(m); m = m.transpose(1, 2)
+            feat = self.backbone(m)
+            feat = feat.mean(dim=2) if feat.dim() == 4 else feat
+            clip, fmax = self.head(feat)
+            return clip, fmax
+
+    sed_model = _SEDModel().eval()
+    _state = torch.load(str(SED_CKPT), map_location='cpu', weights_only=False)
+    sed_model.load_state_dict(_state['state_dict'])
+    torch.set_num_threads(max(1, os.cpu_count() or 4))
+    print(f'SED loaded: val_auc={_state.get("val_auc", "?")}')
+
+    SED_BATCH_FILES = 8  # 8 files × 3 chunks = 24 per batch
+    n_test = len(test_paths)
+    sed_scores = np.zeros((n_test * N_WINDOWS, N_CLASSES), dtype=np.float32)
+
+    sed_t0 = time.time()
+    with torch.inference_mode():
+        for start in tqdm(range(0, n_test, SED_BATCH_FILES), desc='SED'):
+            batch = test_paths[start:start + SED_BATCH_FILES]
+            bn = len(batch)
+            chunks = np.empty((bn * 3, SED_CHUNK_SAMPLES), dtype=np.float32)
+            for bi, path in enumerate(batch):
+                audio = read_soundscape_60s(path)
+                for ci in range(3):
+                    s = ci * SED_CHUNK_SAMPLES
+                    chunks[bi * 3 + ci] = audio[s:s + SED_CHUNK_SAMPLES]
+            x = torch.from_numpy(chunks)
+            clip, _ = sed_model(x)
+            p = torch.sigmoid(clip).cpu().numpy().astype(np.float32)
+            for bi in range(bn):
+                for ci in range(3):
+                    row = (start + bi) * N_WINDOWS + ci * 4
+                    sed_scores[row:row + 4] = p[bi * 3 + ci]
+            del x, clip, p
+    print(f'SED inference: {time.time() - sed_t0:.0f}s')
+
+    # z-score blend on mapped active classes (unmapped stay on priors/constants)
+    blend_classes = np.concatenate([idx_mapped_active_event, idx_mapped_active_texture])
+    blend_classes = np.unique(blend_classes).astype(np.int32)
+
+    def _zscore(x):
+        m = x.mean(0, keepdims=True)
+        s = x.std(0, keepdims=True) + 1e-6
+        return (x - m) / s, m, s
+
+    fs_sub = final_scores[:, blend_classes]
+    sd_sub = sed_scores[:, blend_classes]
+    fs_z, fs_m, fs_s = _zscore(fs_sub)
+    sd_z, _, _ = _zscore(sd_sub)
+    blend_z = SED_BLEND_ALPHA * fs_z + (1.0 - SED_BLEND_ALPHA) * sd_z
+    final_scores[:, blend_classes] = (blend_z * fs_s + fs_m).astype(np.float32)
+    print(f'SED blend applied on {len(blend_classes)} mapped active classes '
+          f'(α_Perch={SED_BLEND_ALPHA})')
+    del sed_model, sed_scores
+    gc.collect()
+else:
+    print('\nSED blend skipped (USE_SED_BLEND off or ckpt missing)')
+
+# ── Build submission ──────────────────────────────────────────────────────────
+from scipy.ndimage import gaussian_filter1d
+
+def gauss_smooth_final(scores, sigma=POST_BLEND_GAUSS_SIGMA):
+    """Post-blend Gaussian temporal smoothing (exp34b best: σ=0.5)."""
+    view = scores.reshape(-1, N_WINDOWS, scores.shape[1])
+    return gaussian_filter1d(view, sigma=sigma, axis=1, mode='nearest').reshape(scores.shape)
+
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+# Rank-aware power transform: boost low-ranked columns
+def rank_aware_power(scores, power=0.4):
+    """Apply power transform per-column based on rank statistics."""
+    out = scores.copy()
+    for j in range(scores.shape[1]):
+        col = scores[:, j]
+        col_range = col.max() - col.min()
+        if col_range < 1e-8:
+            continue
+        normalized = (col - col.min()) / col_range
+        boosted = np.sign(col) * np.abs(normalized) ** power * col_range + col.min()
+        out[:, j] = boosted
+    return out
+
+if RANK_AWARE_POWER != 1.0:
+    final_scores_ranked = rank_aware_power(final_scores, power=RANK_AWARE_POWER)
+else:
+    final_scores_ranked = final_scores  # identity, no transform
+final_scores_smoothed = gauss_smooth_final(final_scores_ranked)
+submission = pd.DataFrame(sigmoid(final_scores_smoothed), columns=PRIMARY_LABELS)
+submission.insert(0, 'row_id', meta_test['row_id'].values)
+submission[PRIMARY_LABELS] = submission[PRIMARY_LABELS].astype(np.float32)
+
+assert len(submission) == len(test_paths) * N_WINDOWS, 'Row count mismatch'
+assert submission.columns.tolist() == ['row_id'] + PRIMARY_LABELS, 'Column order mismatch'
+assert not submission.isna().any().any(), 'NaNs detected in submission'
+assert (submission[PRIMARY_LABELS] >= 0).all().all(), 'Negative probabilities'
+assert (submission[PRIMARY_LABELS] <= 1).all().all(), 'Probabilities > 1'
+
+submission.to_csv('submission.csv', index=False)
+print('submission.csv saved')
+print(f'Shape     : {submission.shape}')
+print(f'Wall time : {time.time() - _WALL_START:.0f}s total')
+submission.iloc[:3, :8]

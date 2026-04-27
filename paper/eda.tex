@@ -1,0 +1,156 @@
+\section{Exploratory Data Analysis}
+\label{sec:eda}
+
+This section presents an exploratory analysis of the BirdCLEF+ 2026 competition dataset,
+focusing on class distribution, soundscape label characteristics, cross-year species overlap,
+and audio quality.
+
+% ------------------------------------------------------------------
+\subsection{Taxonomy Group Breakdown}
+\label{sec:eda:taxonomy}
+
+The competition targets 234 species spanning five taxonomic classes.
+Table~\ref{tab:taxonomy} summarizes the species count and training sample count per class.
+The dataset exhibits extreme imbalance: Aves accounts for 69.2\% of species but 97.9\% of
+training recordings. Reptilia has a single species with one recording.
+
+\begin{table}[h]
+\centering
+\caption{Species and sample distribution by taxonomic class.}
+\label{tab:taxonomy}
+\begin{tabular}{lrrrrr}
+\hline
+\textbf{Class} & \textbf{Species} & \textbf{Samples} & \textbf{Mean/sp} & \textbf{Median/sp} & \textbf{Min--Max} \\
+\hline
+Aves     & 162 & 34{,}799 & 214.8 & 168 & 3--499 \\
+Amphibia &  35 &     451 &  14.1 &   7 & 1--63 \\
+Insecta  &  28 &     199 &  66.3 &  11 & 7--181 \\
+Mammalia &   8 &      99 &  12.4 &   8 & 1--43 \\
+Reptilia &   1 &       1 &   1.0 &   1 & 1--1 \\
+\hline
+\textbf{Total} & \textbf{234} & \textbf{35{,}549} & & & \\
+\hline
+\end{tabular}
+\end{table}
+
+Within the Insecta class, 25 out of 28 species are insect sonotypes (\texttt{47158son01}--\texttt{47158son25})
+that lack species-level identification. The per-species sample distribution follows a heavy-tailed pattern
+across all classes, with substantial variation in Insecta ($\sigma = 99.3$).
+
+% ------------------------------------------------------------------
+\subsection{Train Soundscape Label Analysis}
+\label{sec:eda:soundscapes}
+
+A key addition in BirdCLEF+ 2026 is the expert-annotated \texttt{train\_soundscapes\_labels.csv},
+providing ground truth for 1{,}478 five-second segments across 66 soundscape files.
+
+\paragraph{Multi-label distribution.}
+Table~\ref{tab:multilabel} shows the number of species annotated per segment.
+The modal category is 4 species per segment (24.6\%), and segments with 3--6 species
+comprise 72.7\% of all annotations. This dense multi-label structure reflects the
+acoustic complexity of Pantanal field recordings.
+
+\begin{table}[h]
+\centering
+\caption{Number of species per annotated 5-second segment.}
+\label{tab:multilabel}
+\begin{tabular}{crr}
+\hline
+\textbf{Species/segment} & \textbf{Count} & \textbf{\%} \\
+\hline
+1  & 156  & 10.6 \\
+2  &  98  &  6.6 \\
+3  & 200  & 13.5 \\
+4  & 364  & 24.6 \\
+5  & 320  & 21.6 \\
+6  & 190  & 12.9 \\
+7  & 114  &  7.7 \\
+8  &  28  &  1.9 \\
+9  &   6  &  0.4 \\
+10 &   2  &  0.1 \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Soundscape-only species.}
+Of the 75 unique species present in soundscape annotations, \textbf{28 species appear
+exclusively in soundscape labels and have zero recordings in \texttt{train\_audio}}.
+These include all 25 insect sonotypes, 3 amphibian species
+(\textit{Guaraní leaf-litter frog}, \textit{Southern Orange-legged Leaf Frog},
+\textit{Chiasmocleis mehelyi}), and no avian species.
+This finding is critical: these 28 species can only be learned from the
+labeled soundscape segments, making effective use of \texttt{train\_soundscapes\_labels.csv}
+essential for competitive performance.
+
+Conversely, 159 species in \texttt{train\_audio} do not appear in the soundscape annotations.
+All 234 submission species are covered by the union of both sources.
+
+% ------------------------------------------------------------------
+\subsection{Cross-Year Species Overlap (2025 vs 2026)}
+\label{sec:eda:overlap}
+
+Both BirdCLEF 2025 and 2026 target the Brazilian Pantanal, enabling potential data reuse.
+Table~\ref{tab:overlap} summarizes the species overlap.
+
+\begin{table}[h]
+\centering
+\caption{Species overlap between BirdCLEF 2025 and 2026.}
+\label{tab:overlap}
+\begin{tabular}{lr}
+\hline
+\textbf{Category} & \textbf{Count} \\
+\hline
+2025 total species          & 206 \\
+2026 total species          & 234 \\
+Overlapping species         &  41 \\
+New in 2026                 & 193 \\
+Dropped from 2025           & 165 \\
+Reusable 2025 recordings    & 13{,}484 \\
+\hline
+\end{tabular}
+\end{table}
+
+Only 41 species overlap between years, yielding 13{,}484 potentially reusable 2025 recordings.
+The 193 new species in 2026 are distributed as:
+124 Aves, 33 Amphibia, 28 Insecta, 7 Mammalia, and 1 Reptilia---notably, all
+non-bird taxa are almost entirely new.
+The 2025 \texttt{train\_soundscapes} remain valuable for background noise mixing
+regardless of species overlap, as both datasets share the same acoustic environment.
+
+% ------------------------------------------------------------------
+\subsection{Audio Quality and Collection Sources}
+\label{sec:eda:quality}
+
+Training recordings come from two collections:
+Xeno-canto (XC, $n=23{,}043$, 64.8\%) and iNaturalist (iNat, $n=12{,}506$, 35.2\%).
+
+XC recordings carry user-assigned quality ratings (mean 4.01, median 4.0 on a 1--5 scale).
+iNaturalist recordings have no rating system (all rated 0.0).
+The practical implication is that \textbf{12{,}849 recordings (36.2\%) lack quality metadata},
+all from iNaturalist. Rating-based filtering---commonly used in prior BirdCLEF solutions---would
+exclude all iNat data, which disproportionately covers non-bird species:
+Insecta recordings are 100\% iNat-sourced (mean rating 0.0),
+and Amphibia recordings have a mean rating of 0.54 (mostly iNat).
+
+Any quality filtering strategy must therefore account for collection source to avoid
+eliminating critical training data for underrepresented taxa.
+
+% ------------------------------------------------------------------
+\subsection{Key Takeaways for Model Design}
+\label{sec:eda:takeaways}
+
+\begin{enumerate}
+    \item \textbf{Soundscape labels are indispensable}: 28 species (12\% of total,
+          including all insect sonotypes) exist only in labeled soundscapes.
+          The training pipeline must incorporate 5-second soundscape segments
+          with multi-label targets.
+    \item \textbf{Extreme class imbalance demands dedicated strategies}:
+          non-bird taxa collectively have 750 recordings across 72 species
+          ($\sim$10.4 samples/species) vs.\ Aves at 214.8 samples/species.
+          Dedicated models or aggressive oversampling for Amphibia/Insecta
+          are likely necessary.
+    \item \textbf{Limited cross-year reuse}: only 41 species overlap with 2025,
+          but 2025 soundscapes can serve as background noise augmentation.
+    \item \textbf{Quality filtering must be collection-aware}: naive rating
+          thresholds would eliminate all non-bird iNat data.
+\end{enumerate}

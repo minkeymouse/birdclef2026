@@ -1,0 +1,71 @@
+Classes: 234, Non-bird: 72, Device: cuda
+Loading eval data...
+  Loading exp3_sed_fold0_best.pth...
+  Loading exp3_sed_fold1_best.pth...
+  Loading exp7_st2_fold0_best.pth...
+  Loading exp7_st2_fold1_best.pth...
+  Loading exp8_focal_fold0_best.pth...
+  Loading exp8_focal_fold1_best.pth...
+  Loading exp9_aug_fold0_best.pth...
+  Loading exp9_aug_fold1_best.pth...
+
+Loaded 8 models
+
+============================================================
+INDIVIDUAL MODELS
+============================================================
+  exp3_f0: full_ss=0.7252 (75 cls)
+  exp3_f1: full_ss=0.7321 (75 cls)
+  exp7_f0: full_ss=0.7810 (75 cls)
+  exp7_f1: full_ss=0.8054 (75 cls)
+  exp8_f0: full_ss=0.8148 (75 cls)
+  exp8_f1: full_ss=0.8242 (75 cls)
+  exp9_f0: full_ss=0.8261 (75 cls)
+  exp9_f1: full_ss=0.8302 (75 cls)
+
+============================================================
+EXPERIMENT ENSEMBLES (averaging folds)
+============================================================
+  exp3_ensemble: full_ss=0.7502 (75 cls)
+  exp7_ensemble: full_ss=0.8202 (75 cls)
+  exp8_ensemble: full_ss=0.8414 (75 cls)
+  exp9_ensemble: full_ss=0.8450 (75 cls)
+
+============================================================
+CROSS-EXPERIMENT ENSEMBLES
+============================================================
+  exp8+exp9: full_ss=0.8452 (75 cls)
+  exp7+exp8+exp9: full_ss=0.8466 (75 cls)
+  all_exp: full_ss=0.8463 (75 cls)
+
+============================================================
+POST-PROCESSING (power transform)
+============================================================
+  power=0.5: all_species=0.8466, non_bird_only=0.8466
+  power=0.6: all_species=0.8466, non_bird_only=0.8466
+  power=0.7: all_species=0.8466, non_bird_only=0.8466
+  power=0.8: all_species=0.8466, non_bird_only=0.8466
+  power=0.9: all_species=0.8466, non_bird_only=0.8466
+
+============================================================
+WEIGHTED ENSEMBLE
+============================================================
+  weighted(3:2:1:0.5): full_ss=0.8464 (75 cls)
+  weighted + pt_rare_0.7: full_ss=0.8464
+  weighted + pt_rare_0.8: full_ss=0.8464
+
+============================================================
+BEST CONFIGURATIONS
+============================================================
+  ensemble_exp7+exp8+exp9: 0.8466
+  pt_all_0.5: 0.8466
+  pt_rare_0.5: 0.8466
+  pt_all_0.6: 0.8466
+  pt_rare_0.6: 0.8466
+  pt_all_0.7: 0.8466
+  pt_rare_0.7: 0.8466
+  pt_all_0.8: 0.8466
+  pt_rare_0.8: 0.8466
+  pt_all_0.9: 0.8466
+
+Time: 0.1 min

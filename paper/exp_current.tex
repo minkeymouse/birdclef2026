@@ -1,0 +1,2975 @@
+% BirdCLEF+ 2026 — Working Notes
+% Last updated: 2026-04-27
+% Production: v33 LB 0.932
+% Total LB submissions: 21 over ~2 months
+%
+% =====================================================================
+% EXECUTIVE SUMMARY
+% =====================================================================
+%
+% This document is the running working-note record for our BirdCLEF+
+% 2026 submission. It accumulates ~95 experiments across data pipeline,
+% SED training, ensemble blending, latent diagnostics, and 21 LB
+% submissions.
+%
+% Final state: production v33 LB 0.932, ranked ~200th out of competition
+% leaderboard (top score ~0.95). Our system is Perch v2 + exp50 SED + V9
+% taxon gate + file-max temporal coherence + Gaussian smoothing.
+%
+% Of 21 LB-submitted modifications, only 4 were positive (+0.001 each):
+% v23/v24 (SED swap to exp50), v26 (weight tuning), v33 (file-max).
+% Every other modification regressed by −0.002 to −0.022.
+%
+% Key findings driving the negative-result thesis of this work:
+%
+% 1. SITE-INVARIANCE HIERARCHY DETERMINES LB TRANSFER. Perch's xeno-
+%    canto multi-region pretraining is the only genuinely site-
+%    invariant component in our pipeline. Any modification that
+%    reduces W_Perch below 0.7, or that amplifies SED-derived
+%    (site-conflated) signals, regresses on LB.
+%
+% 2. LOCAL-LB ANTI-CORRELATION STRENGTHENS WITH MODIFICATION
+%    SOPHISTICATION. Simple universal-physics levers (file-max
+%    coherence at α=0.10) transferred. Per-class fitted levers (LR
+%    detectors with LOSO-site CV AUC 0.97) categorically did not.
+%
+% 3. SITE SHORTCUT IS IN THE LABELS, NOT THE MODEL. Insecta sonotypes
+%    are entirely site-conflated in our 4-Insecta-site labeled SS pool;
+%    no architecture or representation can recover site-invariant
+%    Insecta detection from this label structure.
+%
+% 4. PERCH'S LATENT KNOWS WHAT IT DOESN'T KNOW BUT THE OUTPUT HEAD
+%    SUPPRESSES THIS. UNK rows show reduced embedding magnitude and
+%    distinct latent geometry, but output entropy is unchanged
+%    (often actively overconfident on a wrong-vocabulary species).
+%
+% 5. ARCHITECTURE DIVERSITY IS LIMITED BY RECIPE CONVERGENCE. Our 5
+%    SED variants achieve Pearson 0.97--0.99 with each other.
+%    Recipe/data tweaks on the same Boredom HGNet template produce
+%    1--3% residual diversity. To break v33's ceiling, fundamentally
+%    different teacher families are required (Perch v3 release wait,
+%    or training from scratch on different architecture).
+%
+% =====================================================================
+% TABLE OF CONTENTS (sections numbered chronologically as added)
+% =====================================================================
+%
+%   §1  Background and v12 baseline (LB 0.929)
+%   §2  Pipeline failure-mode audit (exp45)
+%   §3  exp47--50 Boredom recipe + 2025 BG → v24/v26 (+0.001 each LB)
+%   §4  exp51 27-class head + v28 LB regression
+%   §5  exp52 v22 catastrophe post-mortem
+%   §6  exp53--54 lever exploration (53 family negative, 54 positive)
+%   §7  exp55--58 mechanism analyses
+%   §8  exp59--69 architecture diversity attempts
+%   §9  exp70--75 audit cycle
+%   §10 exp76--80 iVAE / mel-iVAE chain (v34 LB regression, exp80 teardown)
+%   §11 exp81--85 Q1--Q4 systematic local audit
+%   §12 v36 5-way blend LB regression (exp82c-85)
+%   §13 v33 file-max temporal coherence (LB +0.001)
+%   §14 0.929 → 0.932 honest decomposition (3 site-invariance sources)
+%   §15 exp89--94 latent FFT + TP/FP/TN/FN signal hunt
+%   §16 exp95--98 multi-feature signal mining + S08 deep dive
+%   §17 exp99--100 LR-correction lever (LOSO-site CV 0.97)
+%   §18 exp101--102 multi-teacher variants + LR artifacts
+%   §19 Final 5-slot LB sweep (2026-04-27, all 5 regressed)
+%   §20 Negative-result thesis: why all novel attempts failed
+%
+% =====================================================================
+% FINAL LB SUBMISSION TIMELINE
+% =====================================================================
+%
+%   v1   Perch only (frozen probe, no SED)              0.910
+%   v6   0.80 P + 0.20 SED29 + Gauss σ=0.5              0.912/0.927
+%   v12  + V9 taxon gate                                 0.929
+%   v16  SED41f alone (no Perch)                         0.856
+%   v17  0.8P + 0.2 SED41f                               0.922
+%   v18  v17 + exp44c overlay                            0.916
+%   v19  v17 + exp44g synth                              0.907
+%   v20  v17 + V9 gate                                   0.929
+%   v21  v12 + V9 gate                                   0.929
+%   v22  + exp48 site prior + cluster                    0.913
+%   v23  0.8P + 0.1 SED29 + 0.1 exp50                   0.928
+%   v24  0.8P + 0.2 exp50                                0.930
+%   v25  0.5P + 0.5 exp50                                0.928
+%   v26  0.7P + 0.3 exp50  (peak SED weight)             0.931
+%   v28  v26 + exp51 27-head additive                    0.929
+%   v29  v26 + per-class OOF routing                     0.927
+%   v32  v26 + R5 aliveness routing                      0.930
+%   v33  v26 + L2c file-max coherence α=0.10  PRODUCTION 0.932
+%   v34  v33 + mel-iVAE z-kNN                            0.916
+%   v36  5-way blend W_Perch=0.5                         0.915
+%   v38  LR α=0.3 β=0.1                                  0.920
+%   v39  LR α=0.5 β=0.1                                  0.915
+%   v40  LR α=0.5 β=0.0 (FN-only)                        0.917
+%   v41  threshold rule (no LR)                          0.918
+%   v42  file-max α=0.20                                 0.918
+%
+% =====================================================================
+
+% exp_current.tex — appendix of exp37-43 findings for working-note draft.
+% Merge into experiments.tex when stable. Do not edit experiments.tex directly
+% for in-flight exp42/43 work; stage here to keep main narrative clean.
+
+\subsection{Experiments 37--40: SED retraining under fair evaluation}
+\label{sec:exp37-40}
+
+The 2025-winner recipe (Salman, 18th, LB 0.922 single-SED) lists five key
+ingredients: HGNetV2-B0 backbone, 20-second chunks, raw-waveform mixup,
+cross-entropy on clipwise + framewise-max logits, and 20+ epochs.
+We faithfully re-executed a sweep across these ingredients and recorded that
+no combination beat our SED29 baseline alone on the \emph{fair} 11-file
+held-out evaluation (Val-A\textsubscript{v2}, 132 segments, introduced in
+exp38 after identifying a 48-file training leak in the original Val-A).
+
+\paragraph{Key negative findings.}
+\begin{itemize}
+  \item \textbf{exp37b:} HGNetV2-B2 backbone swap (all other exp29 conditions
+    identical) collapsed from Val-A 0.737 (B0) to 0.58 (B2). The larger
+    backbone overfits our 35k-sample train\_audio set.
+  \item \textbf{exp37c:} Data expansion (labeled SS + 2025-overlap species)
+    without architecture changes plateaued at 0.63.
+  \item \textbf{exp40:} ConvNeXt-small SED ramped slowly (ep4 0.63) and
+    never matched HGNet-B0; blend contribution negligible.
+\end{itemize}
+
+\paragraph{exp38 --- labeled soundscape inclusion.}
+The first clear advance came from including labeled soundscape chunks in
+training. With a 55/11 file split, the student (HGNet B0, 20-sec, BCE+BCE,
+WeightedSampler 20\% SS ratio) reached Val-A\textsubscript{v2} 0.810 at
+epoch 9. Fair-eval three-way blend \{Perch 0.70, SED29 0.15, SED38 0.15\}
+achieved 0.902, +0.011 over Perch alone.
+
+\paragraph{exp39 --- backbone diversity.}
+An EfficientNet-B0 (NS-JFT pretrained) SED trained identically to exp29
+achieved Val-A 0.789 alone (+0.052 over SED29). Pearson correlation with
+SED29 was 0.43 (moderate diversity). Three-way blend \{Perch 0.70, SED29
+0.15, SED39 0.15\} reached 0.909 on fair eval.
+
+\paragraph{LB reality check.}
+Despite local improvements, every SED-swap or SED-addition variant we
+submitted to the leaderboard \emph{regressed} vs. our v12 reference
+(perch-distill with SED29 blend, LB 0.929). Specifically:
+
+\begin{center}
+\begin{tabular}{llrr}
+\toprule
+Version & Configuration & Fair Val-A & LB \\
+\midrule
+v12 (ref) & Perch + SED29 (0.80) + Gauss 0.5                & 0.897 & \textbf{0.929} \\
+v14       & SED29 $\to$ SED38 swap                           & 0.902 & 0.926 \\
+v13       & 3-way + SED38                                    & 0.973\textsuperscript{*} & 0.925 \\
+v15       & 3-way + SED39                                    & 0.909 & 0.922 \\
+v17       & Perch + SED41f (ensemble-pseudo, $\S$\ref{sec:exp41}) & 0.922 & 0.922 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\textsuperscript{*} v13 local Val-A contains leakage with SED38 training files.
+
+The consistent pattern --- local positive, LB flat or negative ---
+indicates the fair 11-file evaluation has high variance and is not a
+reliable LB predictor. We treat it as a necessary but insufficient gate
+and maintain LB submission discipline (5/day hard limit).
+
+\subsection{Experiment 41: Pseudo-labeling pipeline}
+\label{sec:exp41}
+
+We implemented a 2025-winner-style self-training pipeline on the 10{,}592
+unlabeled soundscape files. Teacher: SED29 (train\_audio only);
+Student: HGNet B0 retrained from scratch.
+
+\paragraph{Filter chain.}
+Following the 1st/2nd prize write-ups of BirdCLEF 2025:
+\begin{enumerate}
+  \item Discard chunks where $\max_c p_c < 0.5$ (exp41c, 2nd prize recipe).
+  \item Zero out class probabilities below 0.1 (1st prize recipe).
+  \item Power transform $p^{0.5}$ to reduce pseudo-label noise.
+  \item Per-chunk Mahalanobis confidence weight (exp41b, using SED29
+    pre-head features as proxy since Perch was not yet extracted on the
+    unlabeled soundscape corpus).
+\end{enumerate}
+
+\paragraph{Ensemble-teacher student (exp41f).}
+The strongest variant used an ensemble of (Perch probes $\oplus$ SED29)
+as teacher for pseudo generation. Student trained on train\_audio
+(35{,}549) + labeled SS (55 files) + pseudo (18{,}436 chunks). Best epoch
+8: Val-A\textsubscript{v2} 0.902 alone; three-way blend with Perch at
+$\alpha=0.5$: \textbf{0.922} fair. This is our current local ceiling.
+
+\paragraph{r2 regression.}
+Treating exp41f predictions as a new teacher and running a second round
+of pseudo-generation (exp41h) reduced Val-A\textsubscript{v2} to 0.881
+alone, 0.914 blended. r2 requires a diversified teacher family
+(heterogeneous backbones) to avoid confirmation collapse --- single-family
+iteration runs out of signal quickly.
+
+\subsection{Experiment 42--43: Identifiable latent pseudo-refinement}
+\label{sec:exp42-43}
+
+The core question for our working-note: can a structurally-motivated
+latent space (iVAE with auxiliary conditioning) improve pseudo-label
+confidence beyond the existing Mahalanobis / teacher-posterior signals?
+
+\subsubsection{exp42 --- kNN label agreement under linear corrections}
+On the 708 labeled soundscape windows with cached Perch embeddings
+(exp21), cross-site kNN label agreement was measured. Raw Perch
+(cosine, $k=5$, same-file excluded) achieved cross-site agreement
+0.638 (vs.\ random 0.456, $+0.18$ lift) --- evidence of real species
+signal orthogonal to site co-occurrence. Site-mean centering and
+file-mean centering \emph{dropped} agreement to 0.513 and 0.425
+respectively, consistent with the exp26 Val-B collapse finding:
+linear corrections strip species signal along with the site shortcut.
+
+\subsubsection{exp43b --- iVAE on Perch embeddings}
+We implemented iVAE \citep{khemakhem2020ivae} with $u = $ one-hot(site,
+hour), $\dim(z) = 32$. Our first training run suffered classical
+posterior collapse (KL $\to 0$ by epoch 30, $\sigma_z \to 0.1$) due to
+the standard reduction-\texttt{mean} MSE hiding a $1536\times$ scale
+mismatch with the KL term. After fixing to reduction-\texttt{sum} per
+window, adding $\beta$ warmup $[0\to 1]$ over 50 epochs, standardizing
+Perch input, and applying free-bits (floor of 0.5 nats per dim), the
+model converged cleanly to $\sigma_z \approx 2.4$, rec 226 (standardized).
+Probe AUC: z-32 = 0.934 vs.\ PCA-32 = 0.935 --- iVAE z is
+\emph{identity-preserving} in species discrimination.
+
+\subsubsection{exp43c --- mislabel detection}
+We injected 15\% synthetic label flips and measured ROC-AUC of each
+candidate \emph{disagreement score} for ranking flipped vs.\ clean windows.
+Results at $k=5$, cross-site neighbor restriction:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Space & Flip-detection AUC \\
+\midrule
+Perch raw (1536-d, standardized) & 0.605 \\
+PCA-32                           & 0.597 \\
+iVAE z-32                        & \textbf{0.618} \\
+iVAE z-32 $\oplus$ PCA-32 (64-d) & 0.605 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+iVAE z-32 attains the highest single-space signal at $k=5$, though the
+gap over raw Perch is small ($+0.013$) and Spearman correlation with raw
+Perch kNN signal is 0.84 at this scale, suggesting iVAE at
+$n=708$ is largely a noisy replica of raw-Perch-kNN rather than a
+structurally distinct signal.
+
+\subsubsection{exp43d --- entropy and orthogonality analysis}
+Teacher pseudo probabilities on the 10{,}592-file unlabeled corpus are
+broadly uncertain: 82\% of windows have $\max p_c < 0.5$; median
+$\max p_c = 0.29$. Only 5.5\% are confident ($\max p_c > 0.7$). An
+ambiguous zone (top-1 minus top-2 $< 0.2$) captures 16.6\%
+(21{,}140 windows) --- the natural target for a disambiguation filter.
+
+Crucially, Spearman correlation between Mahalanobis confidence weight
+(exp41b) and teacher posterior sharpness is $+0.15$ --- nearly
+orthogonal. This motivates a multi-signal composite filter.
+
+\subsubsection{exp43g --- composite confidence filter}
+On labeled SS mislabel detection, we combined iVAE z-kNN disagreement,
+raw-Perch kNN disagreement, teacher-ensemble posterior disagreement
+($1 - P(y_\text{label} \mid x)$), and Mahalanobis distance:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Signal / composite & Flip-AUC \\
+\midrule
+Teacher (1 - P) alone              & 0.687 \\
+Perch-kNN alone                    & 0.606 \\
+iVAE-32 kNN alone                  & 0.568 \\
+Mahalanobis alone                  & 0.463 \\
+Perch-kNN + Teacher (rank-mean)    & \textbf{0.707} \\
+All 4 signals (rank-mean)          & 0.632 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Key findings: (i) \emph{teacher posterior is the strongest single signal}
+and was not being exploited by the exp41c filter chain; (ii) Mahalanobis
+on this dataset performs below chance for label-error ranking and
+\emph{hurts} composite scores when included; (iii) at $n=708$ the iVAE
+signal is largely redundant with raw-Perch kNN (Spearman 0.84). We
+expect the iVAE signal to separate from raw-Perch at scale
+($n\approx 128{,}000$), which is the motivating experiment
+(exp43e, in flight).
+
+\subsubsection{exp43i --- teacher-sharpness weighting (ablation)}
+We replaced the Mahalanobis weight in exp41c with a teacher-sharpness
+weight $(p_\text{top1} - p_\text{top2}) / p_\text{top1}$ and retrained
+the student. Fair Val-A\textsubscript{v2} 0.865 alone (vs.\ exp41f
+0.898); blend 0.914 (vs.\ exp41f 0.922) --- \emph{negative}. We
+interpret this as over-weighting already-confident pseudo examples and
+losing useful diversity. The stronger mechanism is to use sharpness as
+a filter gate rather than a raw sample weight.
+
+\subsubsection{exp43e --- pooled iVAE at 128k fails the thesis}
+We extracted Perch embeddings on the full 10{,}658-file soundscape
+corpus (127{,}896 windows) via ONNX on GPU (0.81 sec/batch of 192,
+$\approx 22$ min wall), then trained an MLP iVAE with $\dim(z)=32$,
+$u=(\text{site}, \text{hour})$, non-zero $\beta$-warmup and free-bits.
+Training converged cleanly (KL 63, $\sigma_z = 1.93$, no collapse), but
+flip-detection AUC @ $k{=}10$ on labeled subset was 0.562 (iVAE) vs.
+0.568 (raw Perch): \emph{zero improvement}. Spearman correlation of
+kNN disagreement scores \emph{increased} from 0.84 at $n=708$ to
+\textbf{0.901 at $n=128{,}000$}. Scale worsens redundancy.
+
+Interpretation: Perch pooled embedding is already a species-optimized
+compression. There is no residual site-confound left for a linear-prior
+iVAE to disentangle in $\mathbb{R}^{1536}$. The paper thesis as
+originally framed (iVAE on pooled features) is not viable.
+
+\subsection{Pivot to iVDFM --- innovation-conditioned time-series iVAE}
+\label{sec:ivdfm}
+
+We therefore adopt the iVDFM framework of \citet{chang2026ivdfm}, which
+adapts iVAE to multivariate time series via four changes, each of
+which targets a specific failure mode of pooled-feature iVAE.
+
+\paragraph{Innovation-level conditioning.}
+Rather than conditioning the latent-state prior $p(z_t \mid u_t)$
+(standard time-series iVAE extension), iVDFM conditions the
+\emph{innovation} process $p(\eta_t \mid u_t, e_t)$ that drives the
+dynamics. Identifiability propagates to factors through linear diagonal
+dynamics without the rotational ambiguity that afflicts classical DFMs.
+
+\paragraph{Non-Gaussian innovation prior.}
+\citet{chang2026ivdfm} proves Gaussian innovations are degenerate: for
+any invertible linear $R$, $\tilde \eta = R\eta$ induces the same
+observation distribution. iVDFM uses Laplace (or other non-Gaussian
+exponential family) innovations. In our pooled-iVAE exp43e we used
+Gaussian -- this alone may explain the observed redundancy.
+
+\paragraph{Regime embedding.}
+$e_t = \sum_k \pi_{t,k} e_k$ with $\pi_t = \mathrm{softmax}(
+\text{RegimeNet}(u_t))$ captures discrete acoustic regimes
+(e.g.\ quiet background, bird vocalization, insect stridulation,
+amphibian call) while remaining deterministic given $u_t$. $K=4$ in our
+BirdCLEF adaptation.
+
+\paragraph{Diagonal dynamics.}
+$f_{t+1} = \bar A_t f_t + \bar B_t \eta_t$ with diagonal $\bar A, \bar
+B$ (regime-mixed). The diagonal structure preserves the component-wise
+equivalence class from innovation prior to factor trajectory.
+
+\paragraph{BirdCLEF adaptation (exp43k).}
+Input: Perch \texttt{spatial\_embedding} output, shape $(B, 16, 4, 1536)$,
+averaged over the 4 frequency patches to $(B, T{=}16, 1536)$ per
+5-second window (16 temporal patches of $\approx 313$ ms).
+Auxiliary $u_t = (\mathrm{site\_oh}_{23} \oplus \mathrm{hour\_oh}_{18}
+\oplus \mathrm{pos\_oh}_{16}) \in \mathbb{R}^{57}$; the
+within-window position ensures $u_t$ varies across $t$, providing
+sufficient auxiliary variability for identifiability
+($\lvert (u, e)\rvert \gg r+1$).
+Innovation $\eta_t \in \mathbb{R}^{16}$, Laplace.
+Regime $K=4$, regime code $e_k \in \mathbb{R}^{16}$.
+Encoder: 2-layer bidirectional GRU over $(y_t \oplus u_t \oplus e_t)$.
+Decoder: 2-layer MLP, output $\hat y_t \in \mathbb{R}^{1536}$.
+Training: 25 epochs AdamW $3\times10^{-4}$, cosine schedule, batch 128,
+$\beta$-warmup 0-1 over 8 epochs, free-bits 0.3 nats.
+
+\paragraph{Gates for paper viability.}
+\begin{enumerate}
+  \item[G1] Flip-detection AUC @ $k{=}10$ on labeled subset
+    $\geq 0.626$ (raw-Perch-pooled baseline 0.606, +0.02 gate).
+  \item[G2] Spearman correlation of iVDFM-$f$ kNN disagreement vs.
+    raw-Perch-pooled kNN disagreement $\leq 0.50$ (distinct signal).
+  \item[G3] Regime posterior $\pi_t$ separates qualitatively by coarse
+    acoustic class (inspection).
+\end{enumerate}
+
+G1 and G2 together establish that the identifiability guarantee of
+iVDFM produces a genuinely new signal for pseudo-label refinement
+beyond what a pre-trained foundation model (Perch) already supplies.
+G3 supports interpretability claims in the working-note narrative.
+
+\subsection{Compute discipline}
+
+All local training uses the NVIDIA RTX 5090 (32 GB). The Google Perch v2
+TensorFlow SavedModel, however, is XLA-compiled for CPU only and refuses
+to execute on GPU devices. For local extraction we use the ONNX export
+(\emph{rishikeshjani/perch-onnx-for-birdclef-2026}) with
+\texttt{CUDAExecutionProvider}: 0.81 sec/batch of 192 windows
+(vs.\ 8 sec/batch TF-CPU), a 10$\times$ speedup that makes full-corpus
+Perch extraction (10{,}658 files) a 20-minute operation rather than
+three hours.
+
+% =====================================================================
+\subsection{Experiment 44: Dedicated double-blind species head}
+\label{sec:exp44}
+
+Motivated by the exp43r audit showing that 27 of 234 competition species
+are in neither Perch's 14{,}795-class training set nor
+\texttt{train\_audio} (25 Insecta sonotypes \texttt{47158sonXX}, 2 rare
+Amphibia), we train a dedicated 27-class head on the labeled-soundscape
+55-file training split.
+
+\paragraph{exp44c --- baseline dedicated head.}
+HGNetV2-B0 SED, input BatchNorm on the 128-mel channel dimension, raw
+20-second clips with per-window attention pooling, AdamW
+$1\times10^{-4}$, BCE-clipwise + BCE-framewise-max, 6$\times$ positive
+oversampling, pure fp32 throughout (AMP fp16 overflows on RTX 5090
+compute-capability 12.0a, producing NaN batches; we observed this
+reproducibly and disabled AMP). Best
+Val-A\textsubscript{v2} \textbf{0.848 @ epoch 4} on 15 of 27 evaluable
+classes. Per-class AUC distribution is strongly bimodal: six species
+at $>0.95$ (site-concentrated Insecta sonotypes), two at
+$\approx 0.53$ (random).
+
+\paragraph{exp44e --- blend evaluation.}
+On 40 of 234 evaluable classes (11 held-out files, 122 windows), macro
+AUC by overlay variant:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Variant & Macro (all 40) & Mapped (25) & Unmapped (15) \\
+\midrule
+Raw Perch           & 0.622 & 0.695 & \textbf{0.500 (random)} \\
+Perch + Gauss        & 0.626 & 0.702 & 0.500 \\
+Raw Perch + exp44c   & \textbf{0.752} & 0.695 & \textbf{0.848} \\
+Perch + Gauss + exp44c & \textbf{0.757} & 0.702 & 0.848 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Δ macro = $+0.131$ from the overlay, driven by the 27 unmapped columns
+going from random (AUC 0.500) to 0.848 per-class average.
+
+\paragraph{exp44g --- synthetic site augmentation.}
+Since 16 of 27 species occur in a single site only, the baseline head
+risks learning ``site fingerprint = sonotype''. We augment by mixing
+each source call clip with a background clip drawn from a different
+site's unlabeled soundscape pool: $\alpha \cdot \text{source} + (1 -
+\alpha) \cdot \text{bg}$ with $\alpha \sim U(0.4, 0.8)$, applied with
+probability $0.75$ during training. Best Val-A\textsubscript{v2}
+\textbf{0.884} ($+0.036$ over exp44c). Bottom-10 per-class AUC
+improves from $[0.53, 0.53, 0.71, \ldots]$ to
+$[0.62, 0.67, 0.75, \ldots]$, suggesting the site shortcut is partly
+broken.
+
+\paragraph{exp44f --- leaderboard reality check.}
+We integrate both variants as drop-in replacements for the 27 unmapped
+columns in the \texttt{perch-distill} submission pipeline:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Version & Configuration & LB \\
+\midrule
+v12 (reference) & Perch + SED29 blend & \textbf{0.929} \\
+v17 & Perch + SED41f blend (no overlay) & 0.922 \\
+v18 (2 runs) & v17 + exp44c overlay & 0.916 / 0.914 \\
+v19 & v17 + exp44g overlay & \textbf{0.907} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both overlays regress. Synthetic augmentation \emph{worsens} LB
+despite improving local fair-eval. Our fair 11-file Val-A\textsubscript{v2}
+is not only uninformative but \emph{anti-correlated} with LB for
+single-site taxa: better local $\Rightarrow$ worse LB.
+
+We attribute this to \textbf{distributional (covariate-shift)
+overfitting rather than classical overfitting}. Training curves are
+clean, model parameter count is modest, and loss converges. What the
+model memorizes is the recording-equipment acoustic fingerprint that
+co-varies with site in our training distribution. Synthetic mixing
+diversifies \emph{backgrounds} but cannot remove the source's mic-and-
+preamp response --- so exp44g learns to attend to this fingerprint more
+confidently, and misfires catastrophically on hidden test sites. This
+is a specific instance of the well-known failure mode where domain-
+randomised data augmentation randomises the wrong channel
+\citep{gulrajani2021search}.
+
+\paragraph{Takeaway.} Dedicated heads with
+overlay integration cannot work for single-site taxa without either
+multi-site labeled data, explicit domain-adversarial training, or
+external recordings that de-correlate site from species. None are
+available under the stated competition data policy.
+
+% =====================================================================
+\subsection{Experiment 45: Pipeline failure-mode audit}
+\label{sec:exp45}
+
+The v18/v19 regressions prompted a systematic analysis of which species
+our pipeline actually fails on, beyond the 27 known-unmapped double-
+blind tail.
+
+\paragraph{Setup.}
+For each of the 234 competition classes with at least one positive and
+one negative in the 11-file held-out eval, we compute per-class ROC-AUC
+under four variants: raw Perch probabilities, SED29 alone, SED41f
+alone, and a v12-analog z-blend $0.80\,\text{Perch} + 0.20\,\text{SED29}$
+with $\sigma{=}0.5$ Gaussian smoothing. Forty classes qualified.
+
+\paragraph{Model component comparison.}
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Variant & Macro AUC (40 classes) \\
+\midrule
+Raw Perch alone       & 0.622 \\
+SED29 alone           & 0.715 \\
+v12 z-blend           & 0.714 \\
+\textbf{SED41f alone} & \textbf{0.878} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+SED41f dominates locally; the v12 blend does not recover this. This
+recovers the local mystery of why the (Perch+SED41f) blend in v17 lost
+to v12 on LB: our blend is on the locally-wrong side of the
+local/LB divergence.
+
+\paragraph{What predicts per-class AUC.}
+
+Stratified by \texttt{train\_audio} clip count (species support in the
+clean-recording corpus):
+
+\begin{center}
+\begin{tabular}{ccc}
+\toprule
+Clip count & $n$ classes & Mean AUC \\
+\midrule
+$0$             & 16 & 0.706 \\
+$1$--$10$       & 6  & \textbf{0.491 (worst)} \\
+$11$--$50$      & 9  & 0.765 \\
+$51$--$200$     & 6  & 0.771 \\
+$\geq 200$      & 3  & 0.939 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{The one-to-ten-clip band performs \emph{worse} than zero
+clips.} At zero clips, Perch's output on the corresponding label
+column is structurally constant (the logit is always taken from
+unmapped entries), so its per-class AUC is exactly 0.5. With 1--10
+clips the pipeline learns a noisy signal that is \emph{confidently
+incorrect} on held-out. This is the ``data-scarcity cliff'': enough
+samples to fit, not enough to generalise.
+
+\paragraph{Bottom-8 offenders and their confusion.}
+
+\begin{center}
+\begin{tabular}{llcll}
+\toprule
+Label & AUC & Taxon & $n_\text{TA}$ & Confused with (top-3) \\
+\midrule
+516975 (\emph{Mico melanurus}) & 0.000 & Mammalia  & 3   & litnig1, soulap1, whnjay1 (all Aves) \\
+67107                          & 0.333 & Amphibia  & 0   & 22961, 22930, bcwfin2 (Amphibia cluster) \\
+326272                         & 0.358 & Amphibia  & 0   & 22961, 22930, bcwfin2 \\
+bafcur1                        & 0.398 & Aves      & 125 & strcuc1, sobtyr1, undtin1 (sister Aves) \\
+74113                          & 0.400 & Mammalia  & 2   & compau, osprey, bbwduc (all Aves) \\
+25073                          & 0.407 & Amphibia  & 0   & 22961, 22930, bcwfin2 \\
+116570 (\emph{Caiman yacare})  & 0.441 & Reptilia  & 1   & flawar1, chobla1, yebela1 (all Aves) \\
+47158son11                     & 0.464 & Insecta   & 0   & 22961, 22930, bcwfin2 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two structural patterns emerge:
+
+\begin{enumerate}
+  \item \textbf{Taxonomic inductive bias of Perch.} Every
+    non-Aves non-Insecta offender (3 Mammalia + 1 Reptilia + 1
+    Amphibia with non-zero $n_\text{TA}$) gets confidently classified
+    as one of several bird species. Perch does not abstain on unfamiliar
+    taxa; it maps them onto the nearest-sounding bird in its
+    14{,}795-class training set. A monkey (\emph{Mico melanurus},
+    \emph{Sapajus cay}) and a caiman (\emph{Caiman yacare}) are
+    uniformly classified as bird species. This is a structural
+    limitation of a bird-specialist foundation model used on
+    multi-taxa wildlife monitoring.
+
+  \item \textbf{Sister-species confusion within Aves.} The one Aves
+    species in the bottom set (\texttt{bafcur1}) has abundant training
+    data ($n_\text{TA}=125$) but is still confused with three other
+    Aves. Standard cross-entropy on independent classes cannot exploit
+    between-species acoustic similarity; without pairwise
+    discriminators, close relatives collapse.
+\end{enumerate}
+
+Windows in our eval are overwhelmingly multi-label: 85\% contain 3 or
+more simultaneously vocalising species. The per-class BCE assumption
+of independence is violated by construction.
+
+\paragraph{Next-lever recommendations.}
+
+The audit points to two orthogonal levers not yet tried, each targeting
+a distinct failure mode:
+
+\begin{itemize}
+  \item \textbf{Taxonomic hierarchical loss}: first predict
+    \texttt{class\_name} (Aves / Amphibia / Insecta / Mammalia /
+    Reptilia), then species conditional on taxon. Would directly
+    attack the non-Aves $\to$ Aves confusion that dominates the
+    bottom-8 list.
+  \item \textbf{Dedicated Mammalia/Reptilia sub-head with data-scarcity
+    mitigation}: the 1--10-clip band needs external recordings,
+    spectral-augmentation that actually removes recording-chain
+    fingerprints, or an explicit domain-adversarial loss. Naïve
+    oversampling reproduces the exp44g failure mode.
+\end{itemize}
+
+The audit also clarifies the iVDFM story:
+for single-site taxa, identifiable latent disentanglement of
+\emph{site} as a nuisance factor is the principled solution, but the
+auxiliary variable $u$ must be grounded in acoustic descriptors that
+actually measure the recording chain, not just site identity (which
+is perfectly entangled with species in the training data).
+
+% =====================================================================
+\subsection{Experiment 45a-f: Hierarchical classifier + per-class audit}
+\label{sec:exp45af}
+
+Motivated by exp45's finding that Perch systematically mispredicts
+non-Aves taxa as Aves species, we trained a 5-way taxon classifier
+(Aves / Amphibia / Insecta / Mammalia / Reptilia) on Perch 1536-d
+embeddings with train\_audio (35{,}549) + labeled soundscapes (617 on
+the 55-file training split) $= 36{,}166$ samples. A 2-layer MLP with
+GELU nonlinearity, 256 hidden units, AdamW $1\times10^{-4}$, BCE loss.
+
+\paragraph{exp45a --- multiplicative gating.}
+Combination rule: $\text{final}[c] = \text{base}[c] \cdot
+\text{taxon\_prob}[\tau(c)]$ where $\tau(c)$ is the taxon of class $c$.
+Evaluated on 40 eval classes against raw Perch baseline (0.622 macro):
+macro AUC rises to \textbf{0.745 ($+0.123$)}. Per-taxon: Aves $+0.186$,
+Amphibia $+0.068$, Insecta $+0.181$, \textbf{Mammalia $-0.117$ (regresses)},
+Reptilia $+0.280$. The Mammalia regression traces to species where the
+taxon head itself is uncertain (e.g., 74113: 0.375 $\to$ 0.042); the
+multiplicative gate zeroes out legitimate species signal when the taxon
+detector fails.
+
+\paragraph{exp45b --- class-balanced pos\_weight.}
+Added per-taxon $\text{pos\_weight}_t = N / (5 \cdot N^+_t)$, capped at
+100. Macro drops slightly to 0.737. Balancing does not fix the 74113
+problem (species-level data scarcity is the root cause, not taxon-level
+imbalance). \emph{Accepting that class balance is the wrong axis.}
+
+\paragraph{exp45c --- soft gating variants.}
+Ten combination rules tested. The best is V9, an additive-offset soft
+gate: $\text{final}[c] = \text{base}[c] \cdot (\text{taxon\_prob}[\tau(c)]
++ 0.1)$. Macro climbs to \textbf{0.767 ($+0.145$ over Perch-alone)}, and
+crucially \textbf{every taxon is positive} ($+0.186, +0.081, +0.181,
++0.122, +0.280$). The additive offset floors the gate so species with
+low taxon probability are attenuated but not zeroed --- preserving
+information when the taxon detector fails.
+
+\paragraph{exp45d --- SED weight sweep.}
+Grid sweep over $(w_P, w_{29}, w_{41\text{f}})$ with $\sigma{=}0.5$
+Gaussian smoothing and z-score blend, on 40 eval classes:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Configuration                                  & Local macro & LB \\
+\midrule
+v12 ($0.8P + 0.2\text{S29}$)                   & 0.714       & \textbf{0.929} \\
+v17 ($0.8P + 0.2\text{S41f}$)                  & 0.814       & 0.922 \\
+3-way ($0.7P + 0.15\text{S29} + 0.15\text{S41f}$) & 0.816    & 0.925 \\
+SED41f alone ($w_{41}=1$)                      & \textbf{0.881} & \textbf{0.856} (v16) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Local macro and LB are strongly \textbf{anti-correlated} along the
+$w_{41\text{f}}$ axis. This is not noise: SED41f was trained on
+pseudo-labels generated by a Perch-centered ensemble, so
+Perch's site-specific confidences are baked into SED41f. These
+confidences help on the same-site held-out local eval but hurt on
+hidden-site LB.
+
+Per-species decomposition: SED41f perfectly resolves bafcur1 (Aves
+AUC $0.278 \to 0.946$), litnig1 ($0.364 \to 1.000$), wfwduc1
+($0.488 \to 0.996$) and 27 Insecta sonotypes ($0.500 \to 1.000$).
+None of these local gains transfer to LB.
+
+\paragraph{exp45e --- taxon gate $\times$ base interaction (critical).}
+Apply the V9 gate to each candidate base blend:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Base            & Base macro & Gated macro & $\Delta$ \\
+\midrule
+Perch alone     & 0.622 & \textbf{0.767} & $+0.145$ \\
+v12 ($0.8P + 0.2\text{S29}$) & 0.714 & 0.681 & $-0.033$ \\
+v17 ($0.8P + 0.2\text{S41f}$) & 0.814 & 0.782 & $-0.032$ \\
+3-way           & 0.816 & 0.799 & $-0.017$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{The gate helps only when the base has no species-level signal.}
+On the Perch-alone base, many classes are stuck at 0.5 (no mapping or
+no signal); any soft taxon signal differentiates them. But once a
+competent SED is in the blend, the SED provides real species-level
+ranking that the multiplicative taxon-gate disturbs. For bafcur1, where
+SED41f reached 0.95 on its own, applying the gate dropped it to 0.14 ---
+a catastrophic noise injection.
+
+This reframes the exp45a/c headline ``+0.145 macro from taxon gating''
+as an artifact of using Perch-alone (a strawman base) for comparison.
+Against a production base (Perch + SED blend), the gate is a loss.
+
+\paragraph{exp45f --- per-class optimal teacher weights.}
+For each of 40 eval classes, we grid-search the optimal $\alpha$ in
+$(1-\alpha)\,\text{Perch} + \alpha\,\text{SED41f}$. Distribution of
+optimal $\alpha$ is bimodal: 22 classes prefer $\alpha < 0.25$, 15
+prefer $\alpha > 0.75$, only 3 are in between.
+
+Oracle per-class blend reaches macro 0.903 --- an $+0.025$ upper bound
+over SED41f alone. Per-taxon oracle ceilings: Aves 0.965, Amphibia
+0.895, Insecta 0.906, Mammalia 0.772 (data-scarcity-limited), Reptilia
+0.818.
+
+\paragraph{LB validation of all five directions.}
+We submitted four variants spanning the local/LB trade-off to verify
+the anti-correlation claim:
+
+\begin{center}
+\begin{tabular}{llcc}
+\toprule
+v  & Pipeline                             & Local $\Delta$ macro & LB \\
+\midrule
+v18 & v17 + exp44c overlay (single-site 27-class head) & $+0.131$ & $0.916$ ($-0.013$) \\
+v19 & v17 + exp44g synthetic augmentation              & $+0.167$ & $0.907$ ($-0.022$) \\
+v20 & v17 + V9 taxon gate                              & $-0.032$ & \textbf{$0.929$} ($+0.007$) \\
+v21 & v12 + V9 taxon gate                              & $-0.033$ & \textbf{$0.929$} ($0.000$) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The anti-correlation holds in four independent submissions. Local
+\emph{negative} is required for LB \emph{non-negative} in this
+setup. Interventions that raise local macro by targeting the rare/hard
+40 eval classes must by construction disturb the 194 common classes
+invisible to the local eval but dominant in the LB macro. The gate
+does not push above the v12 ceiling; it can only recover drag from
+suboptimal bases (v17 to v12 ceiling, $+0.007$).
+
+\paragraph{Final lesson for this competition.}
+The fair 11-file held-out is a \emph{selection-biased eval}, and the
+bias axis is taxon abundance. After four LB attempts costing slots, our
+working rule for future submissions is: target local macro deltas in
+the range $[-0.05, -0.02]$ to search for LB positives; local gains
+greater than $+0.05$ are reliable warning flags for rare-taxa overfit.
+This is the actionable output of five local experiments (exp45a-f)
+grounded in five LB submissions.
+
+\subsection{exp47 --- Boredom-style SED faithful reproduction}
+\label{sec:exp47}
+
+\paragraph{Motivation.} The 2025 winner ``Boredom'' reported LB~0.947
+with a single EfficientNet SED trained on \texttt{train\_audio} plus
+labeled soundscapes only --- no Perch, no knowledge distillation, no
+unlabeled pseudo-labeling. Our strongest single SED so far
+(exp41f, HGNet-B0 + ensemble-teacher pseudo + labeled SS) reaches
+local macro 0.902 on our rare-heavy 11-file held-out. The
+reproducibility of Boredom's 0.947 number determines whether our
+pipeline has an implementation gap or a fundamental ceiling.
+
+\paragraph{Recipe.} We reproduce the consolidated 2025 top-scorer
+insight:
+\begin{itemize}
+\item Backbone: HGNetV2-B0 (\texttt{hgnetv2\_b0.ssld\_stage2\_ft\_in1k})
+\item Input: 20\,s raw audio $\to$ GPU mel-spectrogram
+  ($n_{\text{fft}}=2048$, hop $512$, $n_{\text{mels}}=128$,
+  $f\in[50, 14000]$\,Hz)
+\item Input normalisation: \texttt{BatchNorm2d}$(n_{\text{mels}})$
+  applied on the frequency dimension --- without this, fp32 logits
+  overflow during warmup
+\item Augmentation: raw-waveform mixup ($\alpha{=}0.5$, $p{=}0.6$) +
+  SpecAugment ($F{=}16$, $T{=}40$); no background-mixing
+\item Head: attention-pooled clipwise + framewise logits, hybrid loss
+  BCE(clipwise) + BCE(framewise\_max), with primary-label
+  one-hot and secondary-label weight 0.3
+\item Optimiser: AdamW, LR $10^{-3}$, WD $10^{-2}$, cosine over 30\,ep
+  with 3\,ep linear warmup, grad clip 1.0, pure fp32 (AMP overflows on
+  RTX 5090 compute cap 12.0a)
+\item Data: 28\,526 \texttt{train\_audio} clips (80\% stratified by
+  \texttt{primary\_label}) + 617 labeled SS windows (55 files);
+  weighted sampler gives $\sim$85\% train\_audio / 15\% SS per batch
+\end{itemize}
+
+\paragraph{Dual evaluation.} Two held-out AUCs per epoch, both
+macro-averaged over classes with both positives and negatives:
+\begin{itemize}
+\item \textbf{val\_TA} (171 evaluable classes) --- 20\% of
+  \texttt{train\_audio}, clean single-label, dominated by common Aves.
+  Plays the role of a clean-domain LB proxy.
+\item \textbf{val\_SS} (40 evaluable classes) --- the same 11 labeled-SS
+  files used by exp38/41f, rare-heavy multi-label.
+\end{itemize}
+
+\paragraph{Results.} After 21 ep (run halted at patience-3 plateau on
+val\_TA):
+\begin{center}
+\begin{tabular}{rccc}
+\toprule
+ep & LR & val\_TA (171 cls) & val\_SS (40 cls) \\
+\midrule
+01 & 0.00033 & 0.8950 & 0.7954 \\
+02 & 0.00067 & 0.9342 & \textbf{0.8661} \\
+05 & 0.00099 & 0.9726 & 0.8442 \\
+07 & 0.00095 & 0.9764 & 0.8332 \\
+11 & 0.00080 & 0.9795 & 0.8372 \\
+14 & 0.00064 & 0.9852 & 0.8136 \\
+16 & 0.00053 & \textbf{0.9866} & 0.7858 \\
+21 & 0.00025 & 0.9866 & 0.8048 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Finding 1: Boredom's headline is train\_audio-domain.}
+A single HGNet-B0 reaches val\_TA 0.987 within 20 epochs under the
+published Boredom recipe --- \emph{well above} the 0.947 claim. The
+discrepancy tells us Boredom's 0.947 is almost certainly not the LB:
+it is more consistent with a clean \texttt{train\_audio} held-out
+macro than with the site-heterogeneous public test LB. Our own LB
+ceiling of 0.929 is therefore not a ``Boredom gap'' to be closed; it
+is a hidden-site covariate shift that a train\_audio-tuned model
+cannot escape.
+
+\paragraph{Finding 2: Within-run val\_TA--val\_SS anti-correlation.}
+val\_TA monotonically rises $0.895 \to 0.987$, yet val\_SS peaks
+early at ep02 ($0.866$) and decays to $0.786$ at ep16. This is the
+selection-biased anti-correlation of Section~\ref{sec:exp45}, but
+observed \emph{within a single optimisation trajectory}. The
+trade-off is not a model-capacity limit. It is capacity
+\emph{allocation}: BCE over 234 classes has a majority-class-dominated
+gradient; polish cycles on common Aves memorise confidently wrong
+responses on 27 double-blind sonotypes and other data-scarcity-cliff
+taxa, driving their AUC below chance.
+
+\paragraph{Finding 3: SED strengthening does not unlock additional
+blend lever.} Perch already near-saturates common-Aves classes (LB
+0.929 with no SED ensemble). Strengthening the SED component
+(SED29 alone 0.737 $\to$ SED41f alone 0.878 $\to$ exp47 val\_TA 0.987,
+all measured on their respective held-outs) improves
+\emph{within-domain} single-model AUC on common classes, but adds no
+information that Perch does not already have on those classes. The
+only classes where SED could in principle contribute new
+information are the rare 27 double-blind species --- and on those
+classes, every SED trained on the same imbalanced data remains weak.
+The SED axis is orthogonal to Perch only on rare species, and on rare
+species it is orthogonally weak. This reframes the v17 LB regression
+(SED29 $\to$ SED41f swap, $-0.007$ LB) as an expected outcome: the
+blend was paying for marginal common-class noise without the rare-class
+orthogonal signal needed to offset it.
+
+\paragraph{Implication for the paper thesis.} The failure mode is
+universal across: (i) the feature backbone (Perch, supervised
+pre-trained on 14\,795 bird classes), (ii) distilled students (exp41f
+family), and (iii) from-scratch SEDs (exp47, Boredom recipe). All
+three cohorts achieve strong common-Aves metrics and all three
+collapse on the 31 species that are absent or near-absent from
+\texttt{train\_audio}. \textbf{A bigger/better SED is not the lever.}
+The lever must inject rare-class information from outside the
+\texttt{train\_audio} $\cup$ labeled SS distribution (external
+bioacoustic datasets, synthetic physical-model audio, or
+domain-adaptation signals on unlabeled test-site SS).
+
+\subsection{exp48 --- Six-hour deep dive on error patterns and post-hoc levers}
+\label{sec:exp48}
+
+\paragraph{Motivation.} The exp47 conclusion that ``bigger SED does not
+help'' rested on aggregate measures. To find remaining levers within
+our data regime, we performed a structured six-hour audit on the 11-file
+held-out: six new error-pattern signatures (exp48a), and five candidate
+post-hoc interventions (exp48b-g).
+
+\paragraph{Six novel error patterns (exp48a).}
+\begin{itemize}
+\item \textbf{Site variance is the dominant error axis.} Per-site macro
+  AUC on v12: S13 0.833, S22 0.780, S23 0.668, S19 0.592, S08 0.517 ---
+  a 0.316 spread.
+\item \textbf{Hour-of-day matters.} 20:00-24:00 (night) macro 0.794;
+  16:00-20:00 (dusk) 0.592. Diurnal species overlap dominates.
+\item \textbf{Errors are confident-wrong, not low-signal.} For all
+  bottom-8 classes, the top-10 negative-row prediction exceeds the
+  positive-row median (e.g., 326272 Amphibia: neg-top10 0.944 vs
+  pos-median 0.398). Perch does not abstain on unknown taxa --- it
+  assigns them high confidence to the wrong species.
+\item \textbf{Confusion is structurally clustered.} 47158son21, 22, 23
+  (Insect sonotypes) all project to the same Aves triplet
+  \{grhtan1, greant1, compot1\}. 25073, 67107, 326272 (Amphibia) all
+  project to \{bcwfin2, rutjac1, tattin1\}. This regularity enables a
+  cluster-based rewrite rule.
+\item \textbf{Within-file prediction SD tracks signal quality.} For
+  bottom-8 classes, within-file SD is 0.01--0.02 (flat curves --- purely
+  file-level bias). For well-performing classes, SD is 0.08+ (temporal
+  tracking of species calls). Flat predictions signal absence of
+  acoustic information.
+\item \textbf{Prediction range is compressed to [0.47, 0.51].}
+  Multiplicative priors at inference have enormous ranking leverage
+  because absolute confidence is near-uniform; all AUC is driven by
+  small relative differences.
+\end{itemize}
+
+\paragraph{Five post-hoc levers, leak-free evaluation (exp48b--g).}
+All priors and cluster definitions are derived from the 55-file train
+split; evaluation on the 11-file held-out. Base: v12 macro 0.7143.
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Lever (best config)                         & macro $\Delta$ & Aves $\Delta$ \\
+\midrule
+site prior, soft $\tau{=}0.75$              & $+0.117$  & $+0.006$ \\
+cluster rewrite alone, $\alpha{=}2$         & $+0.034$  & $+0.003$ \\
+site + cluster, $\tau{=}0.5$, $\alpha{=}2$  & $+0.118$  & $+0.004$ \\
+site + cluster + exp47 blend ($w_{47}{=}0.25$, $\tau{=}0.75$, $\alpha{=}4$) & $\mathbf{+0.141}$ & $\mathbf{+0.062}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Eval-derived cluster rewrite (leaky reference) reaches $\Delta = +0.090$;
+the leak-free version ($+0.034$) is about one-third. The remaining
+$+0.034$ is genuine transferable signal. Combining site prior with
+cluster rewrite yields $+0.118$, showing the two levers are
+non-redundant (site prior targets geographic species absence; cluster
+rewrite targets within-window Aves-cluster co-firing).
+
+\paragraph{exp48f --- modality independence audit.}
+We ran exp47 inference on the 11-file held-out and compared four
+teachers head-to-head.
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Pair  & Spearman $\rho$ (preds) & residual-corr (pred-$y$) \\
+\midrule
+perch vs sed29          & $+0.003$ & $+0.792$ \\
+perch vs sed41f         & $-0.037$ & $+0.695$ \\
+\textbf{perch vs exp47} & $\mathbf{+0.011}$ & $\mathbf{+0.640}$ \\
+sed29 vs sed41f         & $+0.349$ & $+0.901$ \\
+sed41f vs exp47         & $+0.675$ & $+0.937$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+exp47 has both the weakest signal dependence and the weakest error
+dependence with Perch. The gap between exp47 and sed41f (both see
+labeled SS) is attributable to exp47's absence of Perch-derived
+pseudo-labels: sed41f's pseudo-distillation path imports Perch's error
+structure.
+
+\paragraph{exp48f --- bottom-8 per-teacher AUC: the mechanism.}
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+class & taxon & Perch & sed29 & sed41f & \textbf{exp47} \\
+\midrule
+516975   & Mammalia & 0.500 & 0.000 & 0.000 & \textbf{1.000} \\
+67107    & Amphibia & 0.357 & 0.408 & 0.490 & \textbf{0.873} \\
+bafcur1  & Aves     & 0.278 & 0.593 & 0.946 & \textbf{0.966} \\
+74113    & Mammalia & 0.375 & 0.498 & 0.815 & 0.615 \\
+25073    & Amphibia & 0.500 & 0.414 & \textbf{1.000} & 0.434 \\
+326272   & Amphibia & 0.414 & 0.438 & \textbf{0.755} & 0.442 \\
+116570   & Reptilia & 0.500 & 0.441 & 0.818 & 0.646 \\
+47158son11 & Insecta & 0.500 & 0.479 & \textbf{1.000} & 0.992 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two classes (516975 Mico melanurus, 67107) are solved \emph{only} by
+exp47 at $0.87$-$1.00$ while Perch, sed29 and sed41f cluster around
+chance. The controlled comparison --- sed41f and exp47 both see labeled
+SS, same backbone family, same data budget --- isolates the
+pseudo-distillation factor. 516975 is unmapped from Perch's
+14,795-class taxonomy: Perch pseudo-labels on 516975's true
+positive windows are confidently ``Aves-X'', which sed41f's
+distillation loss treats as ground truth, overwriting the clean labeled
+SS positives. exp47, trained with no pseudo supervision, learns the
+clean S09 Mico melanurus labels directly.
+
+\paragraph{Lesson refinement.} Our earlier claim ``bigger SED does not
+help'' held in aggregate but hides a bimodal per-class reality:
+\begin{itemize}
+\item For common Aves (Perch near-saturated): more capacity adds no
+  information, as asserted.
+\item For rare classes in labeled SS: Perch-distillation is actively
+  harmful, not neutral. Training without pseudo recovers clean-label
+  signal. This is the concrete mechanism behind Boredom's (2025
+  winner) ``no KD'' recipe choice.
+\end{itemize}
+
+\paragraph{Anti-correlation rule refinement.}
+Across four submitted LB experiments, local-macro $\Delta$ sign
+correlated inversely with LB $\Delta$ --- but the critical signature is
+not the local macro itself, it is the \textbf{sign of Aves $\Delta$}.
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Config                    & local $\Delta$ & Aves $\Delta$ & LB $\Delta$ \\
+\midrule
+v18 (pushes rare down Aves) & $+0.131$ & negative & $-0.013$ \\
+v19 (rare overlay)          & $+0.167$ & negative & $-0.022$ \\
+v20 (gate on v17)           & $-0.032$ & $\approx 0$ & $+0.007$ \\
+v21 (gate on v12)           & $-0.033$ & $\approx 0$ & $\phantom{+}0.000$ \\
+exp48g aggressive (proposed) & $+0.141$ & $+0.062$ & untested \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Interventions that raise local macro by trading Aves for rare have
+historically regressed LB (v18/v19). Interventions that touch Aves
+neutrally neither help nor hurt (v20/v21). exp48g is the first config
+where local $+$ is achieved \emph{together with Aves $+$}, putting it
+outside the previously established anti-correlation regime.
+
+\paragraph{Damage check.} The aggressive top config has one
+class with catastrophic drop: 1491113 (Amphibia) $0.565 \to 0.118$
+($-0.447$) due to mis-defined cluster triggers. A per-class cluster
+whitelist is recommended before LB submission.
+
+\subsection{exp48g LB result and the v22 catastrophe}
+\label{sec:v22_catastrophe}
+
+The exp48g aggressive configuration was submitted as v22 (Kaggle kernel
+v22) and \textbf{regressed by $-0.016$ LB} (0.929 v12 baseline $\to$ 0.913).
+This is the largest LB regression we have observed and refutes the
+``Aves $\Delta$ positive predicts LB positive'' hypothesis tabled at the
+end of \S\ref{sec:exp48}.
+
+\paragraph{Audit.} On the 66-file labeled SS held-out (eval $+$ training),
+v22 macro AUC is $0.910$ vs v12 $0.722$, an apparent $+0.188$ improvement
+that includes Aves at $+0.20$. Yet LB regressed $-0.016$. The
+\textbf{Spearman row-correlation between v12 and v22 predictions
+collapses to $0.745$} (vs $\geq 0.95$ for our other interventions),
+indicating that v22 reshuffled $\sim$25\% of the within-row class
+ranking on every test window. The site-prior factor $\tau \cdot
+P(\textrm{species} \mid \textrm{site}) + (1-\tau)$ is the dominant
+contributor: at $\tau = 0.75$ it directly multiplies the predicted
+score by the per-site empirical frequency from the train soundscape
+split. The cluster-rewrite $\alpha = 2$ further amplifies any class for
+which the trigger-Aves triplet co-fires.
+
+\paragraph{Mechanism.} Both site prior and cluster rewrite are
+\emph{train-distribution lookup tables}. They encode regularities
+specific to the 55-file train SS (sites S03-S23). On hidden-site test,
+those regularities do not hold. The cluster rewrite specifically
+multiplies the rare-target score by $1 + \alpha \cdot
+\min(\textrm{trigger-prob})$; on the test distribution the same trigger
+Aves fire without the rare target being present, generating false
+positives. This shows up as: very large local AUC gain on classes
+matching the cluster patterns (which dominate the local 40-class
+evaluable set), large LB regression because the patterns do not
+generalise.
+
+\paragraph{Updated lever taxonomy.} After v22, our submitted-and-scored
+levers split into three classes:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Lever class & Mechanism & LB transfer \\
+\midrule
+Train-SS-derived multiplicative lookup & v18, v19, v22 & $-0.013$ to $-0.022$ (always negative) \\
+Self-consistency post-hoc gate         & v20, v21 V9 taxon gate    & neutral (0 to $+0.007$) \\
+Base-pipeline blend modification       & v13, v14, v17 (Perch-derived SEDs) & $-0.003$ to $-0.007$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The first class is a strict negative pattern: any rule learned from
+labeled-SS row-level distribution fails on hidden-site test.
+
+\subsection{exp50 --- Boredom recipe with 2025 soundscape BG mixing}
+\label{sec:exp50}
+
+Motivated by exp47's ``no Perch pseudo'' insight (\S\ref{sec:exp47}), we
+re-trained the same architecture with one critical augmentation:
+during raw-waveform mixup, with probability $p_{\text{BG}} = 0.4$,
+mix the source clip with a quiet 5-sec window randomly sampled from the
+9~726 \emph{2025-edition} soundscapes (Colombian Upper Magdalena
+Valley, geographically distinct from the 2026 Pantanal training sites).
+$\alpha \sim \mathcal{U}(0.3, 0.7)$. We extract 11~920 quiet windows
+from 4000 sampled 2025 soundscapes (RMS in bottom 40~\% of file,
+$\textrm{abs}_{\max} < 0.95$, audible) into a 7~GB pool.
+
+Hypothesis: the Pantanal-only 2026 SS gives the model a stable site
+fingerprint to memorise; mixing with Colombian background forces the
+model to discriminate species against backgrounds it has never seen at
+training, encouraging a site-invariant decision boundary.
+
+\paragraph{Result.} exp50 best epoch 16:
+\begin{itemize}
+\item val\_TA (170 train\_audio classes, common-Aves dominated): $0.9882$
+  vs exp47's $0.9866$ ($+0.0016$, no harm to common).
+\item val\_SS (40 labeled-SS held-out classes, rare-heavy): $0.8378$ vs
+  exp47's $0.7858$ \textbf{($+0.0520$)}.
+\end{itemize}
+
+The 2025 BG augmentation gives a $+5\%$ rare-class gain at zero common-class
+cost. Per-class on the 11-file held-out (\S\ref{sec:exp52} extension):
+exp50 alone uniquely rescues 516975 (Mico melanurus, Mammalia) from $0.012 \to
+1.000$, 67107 (Amphibia) from $0.357 \to 0.873$. sed41f, despite seeing
+the same labeled SS, does not rescue these because Perch-pseudo
+labels overwrite the labeled-SS gradient signal.
+
+\subsection{exp50 LB integration --- breaking the v12 ceiling}
+\label{sec:exp50_lb}
+
+We tested the exp50 SED at progressively higher blend weights against
+the production v26 baseline. Weight sweep:
+
+\begin{center}
+\begin{tabular}{rrr}
+\toprule
+$w_{\text{exp50}}$ & Config name & LB \\
+\midrule
+$0.10$ (with $w_{\text{SED29}} = 0.10$) & v23 & $0.928$ \\
+$0.20$ (SED29 dropped)                   & v24 & $\mathbf{0.930}$ \\
+$0.30$ (SED29 dropped)                   & \textbf{v26} & $\mathbf{0.931}$ \\
+$0.50$ (SED29 dropped)                   & v25 & $0.928$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{v26 is the first submission to exceed the long-standing v12 LB
+ceiling of 0.929.} The slope $dLB/dw_{50}$ peaks at $0.3$, regresses
+beyond. Direct comparison: v17 used the same blend structure (0.8 P + 0.2
+SED41f) and got LB $0.922$; substituting exp50 for SED41f lifts LB to
+$0.930$ ($+0.008$). The Perch-independence (residual-correlation with
+Perch on 11-file held-out: exp50 = 0.640 vs sed41f = 0.695 vs sed29 =
+0.792) translates directly to LB transfer quality.
+
+\paragraph{Class-level mechanism (exp64).} Per-class AUC change on the
+66-file labeled SS, v12 $\to$ v26:
+
+\begin{itemize}
+\item 32 of 234 classes have KS distribution shift $> 0.3$. \textbf{25 of
+  these are 47158son* Insecta sonotypes} ($n_{\text{train\_audio}} = 0$
+  in 2026); the remaining 7 are non-Aves (Mammalia, Reptilia, some
+  Amphibia). \textbf{0 of 162 Aves classes} shifted by $> 0.3$.
+\item v26 lifts the bottom-AUC classes drastically: 516975 ($0.012 \to
+  1.000$), plcjay1 ($0.153 \to 0.999$), 65377 ($0.416 \to 0.998$).
+\item Common Aves with $v_{12} \geq 0.9$ have mean $\Delta = +0.043$
+  (small uplift, no regression).
+\end{itemize}
+
+The mechanism is targeted: \textbf{exp50 fills the rare-class void
+without disturbing common-class predictions where Perch already
+dominates}. This is consistent with a residual-correlation hypothesis
+of LB transfer: ensembles of less-correlated teachers transfer better
+than ensembles of correlated teachers.
+
+\subsection{exp64 --- Perch's structural dead zones}
+\label{sec:exp64}
+
+To understand the v26 gain mechanism precisely, we computed Perch's
+$p_{99}$ (top-1\% predicted probability) across all 10~658 unlabeled
+2026 soundscapes per class. This is a model property determined entirely
+by Perch's training data; it does not depend on the labeled-SS
+distribution.
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Taxon & Total cls & $p_{99} \geq 0.3$ (``Perch alive'') \\
+\midrule
+Aves & 162 & 91 (56\%) \\
+Amphibia & 35 & 11 (31\%) \\
+\textbf{Insecta} & 28 & \textbf{0 (0\%)} \\
+Mammalia & 8 & 2 (25\%) \\
+Reptilia & 1 & 0 (0\%) \\
+\midrule
+Total & 234 & 104 (44\%) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Perch's $p_{99} < 0.1$ on every Insecta sonotype.} Perch's training
+includes only 3 of 28 species in our Insecta set; the remaining 25
+($\sim$\texttt{47158son*}) and the 11 with $p_{99} < 0.1$ in non-Aves
+classes are structurally outside Perch's representational coverage.
+This explains why v12 (Perch-dominated) is hard-capped on these
+classes, and why exp50's signal on the same classes lifts the blend.
+
+\subsection{exp65--66 --- Multi-criteria class-conditional routing}
+\label{sec:exp65_66}
+
+We then tested whether the Perch-aliveness signal could be turned into
+a per-class blend rule. Several variants were evaluated on the 11-file
+held-out:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Rule & local $\Delta$ & Spearman vs v26 & Aves $\Delta$ \\
+\midrule
+v26 (global $0.7P + 0.3 \cdot \text{exp50}$) & $0$ & $1.000$ & $0$ \\
+R5 ($p_{99} < 0.1$ AND exp50\_$p_{99} \geq 0.3$ $\to$ $w_{50}=1$, $n=4$) & $+0.016$ & $0.992$ & $+0.019$ \\
+R6 (continuous $w_{50} = 1 - 0.7 \cdot p_{99}$) & $+0.018$ & $0.956$ & $+0.018$ \\
+R8 (3-tier: dead/semi/alive) & $+0.017$ & $0.991$ & $+0.019$ \\
+R9 (drop exp50 where exp50 dead) & $\mathbf{-0.047}$ & $0.966$ & $\mathbf{-0.073}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+R9's collapse is the diagnostic surprise: \textbf{when we surgically
+remove exp50 weight from the 163 classes where exp50 itself has
+$p_{99} < 0.1$, local macro drops by $-0.047$.} Because exp50 produces
+near-constant low-magnitude output on those 163 classes, the
+$0.3 \cdot z(\text{exp50})$ term in v26 is mostly amplified random
+noise --- and yet removing the noise hurts.
+
+This recasts our understanding of what v26 actually does. The
+$+0.002$ LB gain (v12 $\to$ v26) is at least partially attributable to a
+\textbf{noise-regularisation effect} from the additive $0.3 \cdot
+z(\text{noise})$ on Perch-strong classes, not only to the targeted
+rare-class signal on Perch-dead classes. Removing the noise removes a
+small but positive regulariser on the cross-class macro AUC ranking.
+
+\paragraph{Implications.} The local $+0.016$--$+0.018$ gain of routing
+schemes (R5, R6, R8) is most likely \emph{also} a partial-noise effect
+on the labeled SS distribution and does not necessarily transfer to LB.
+This is consistent with the v22 / v28 / v29 pattern, where each routing
+attempt with apparently safe Spearman ($\geq 0.99$) and positive Aves
+$\Delta$ has nonetheless regressed LB by $-0.001$ to $-0.016$.
+
+\subsection{exp68 --- Quick rejections of Gauss / rank-norm levers}
+\label{sec:exp68}
+
+Multi-$\sigma$ Gauss ensembles ($\sigma \in \{0.3, 0.5, 0.7, 1.0\}$
+averaged) and per-class quantile-to-normal rank normalisation were
+tested as alternatives to the routing schemes:
+
+\begin{itemize}
+\item Multi-$\sigma$ averaging gives macro $\Delta \leq +0.0024$
+  (negligible) with Spearman $\geq 0.95$.
+\item Per-class quantile rank-normalisation is per-class AUC-invariant
+  by construction and yields macro $\Delta = 0$.
+\item Per-class std equalisation: $-0.0003$ (slight regression).
+\item Per-row entropy adaptive blend: $+0.004$ (margin-of-error).
+\end{itemize}
+
+These post-hoc levers do not move the needle. Rejected as candidates.
+
+\subsection{exp59 --- ConvNeXt SED diversity test}
+\label{sec:exp59}
+
+To probe whether architecture diversity translates to prediction
+diversity, we trained a ConvNeXt-tiny SED with the same Boredom recipe
+$+$ 2025 BG mixing as exp50 (HGNet-B0). Best epoch 18:
+val\_TA $0.9872$ vs exp50 $0.9882$ (parity), val\_SS $0.8589$ vs
+exp50 $0.8378$ ($+0.021$).
+
+\paragraph{Diversity check on 66-file labeled SS.}
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Pair & Pearson on raw predictions \\
+\midrule
+Perch $\leftrightarrow$ exp50 & $-0.058$ \\
+Perch $\leftrightarrow$ exp59 & $-0.058$ \\
+\textbf{exp50 $\leftrightarrow$ exp59} & $\mathbf{+0.981}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Different architectures with the same training recipe produce
+near-identical predictions.} The training procedure (data + recipe)
+dominates inductive bias more than the backbone choice. ConvNeXt and
+HGNet-B0 are essentially substitutable in our blend.
+
+\paragraph{Local 4-way blend variants.} We tested various 3-teacher
+($P + \text{exp50} + \text{exp59}$) blends on held-out 11:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Config & macro $\Delta$ vs v26 & Spearman \\
+\midrule
+$0.7P + 0.2 \cdot \text{exp50} + 0.1 \cdot \text{exp59}$ & $+0.005$ & $0.994$ \\
+$0.7P + 0.15 + 0.15$ & $+0.009$ & $0.988$ \\
+$0.6P + 0.2 + 0.2$ & $+0.019$ & $0.985$ \\
+$0.6P + 0.0 + 0.4$ (drop exp50) & $+0.021$ & $0.946$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The 4-way ensemble offers marginal local gains because exp50 and exp59
+are too similar. To get genuine improvement from a 4-way blend we
+would need a teacher with $\rho < 0.7$ relative to exp50 (a different
+training recipe, not just a different backbone).
+
+\subsection{Updated submission timeline (2026-04-23 to 2026-04-25)}
+\label{sec:submissions_v22_v29}
+
+\begin{center}
+\begin{tabular}{rlcc}
+\toprule
+v & Configuration & LB & $\Delta$ vs v12 (0.929) \\
+\midrule
+v12 & $0.8P + 0.2 \cdot \text{SED29}$ + Gauss + V9 (production)         & $0.929$ & 0 \\
+v17 & $0.8P + 0.2 \cdot \text{SED41f}$                                  & $0.922$ & $-0.007$ \\
+v18 & v17 + exp44c overlay                                              & $0.916$ & $-0.013$ \\
+v19 & v17 + exp44g synth-aug                                            & $0.907$ & $-0.022$ \\
+v20 & v17 + V9 taxon gate                                               & $0.929$ & $0$ \\
+v21 & v12 + V9 taxon gate                                               & $0.929$ & $0$ \\
+v22 & v12 + V9 + exp48 (site prior $\tau{=}0.75$ + cluster $\alpha{=}2$) & $0.913$ & $\mathbf{-0.016}$ \\
+v23 & $0.8P + 0.1 \cdot \text{SED29} + 0.1 \cdot \text{exp50}$           & $0.928$ & $-0.001$ \\
+\textbf{v24} & $0.8P + 0.2 \cdot \text{exp50}$ (drop SED29)               & $\mathbf{0.930}$ & $\mathbf{+0.001}$ \\
+v25 & $0.5P + 0.5 \cdot \text{exp50}$                                   & $0.928$ & $-0.001$ \\
+\textbf{v26} & $0.7P + 0.3 \cdot \text{exp50}$ (peak)                    & $\mathbf{0.931}$ & $\mathbf{+0.002}$ \\
+v27 & v26 + class-conditional Aves vs non-Aves split (push)              & $0.927$ & $-0.002$ (worst case in slot 2) \\
+v28 & v26 + exp51 27-head additive @ $w{=}0.10$                          & $0.929$ & $-0.002$ \\
+v29 & v26 + per-class adaptive blend (R1/R3 from OOF on train SS)         & $0.927$ & $-0.004$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Reading the table.}
+The pattern of LB regressions vs the v26 ($0.931$) baseline reveals a
+strong invariant: \textbf{any modification beyond a single global blend
+weight regresses LB.} Even when local Spearman vs v26 stays
+$\geq 0.99$ and Aves $\Delta \geq 0$ (v28, v29), the LB outcome is
+$-0.001$ to $-0.004$. The v26 weight $0.7P + 0.3 \cdot \text{exp50}$
+appears to be a Pareto-frontier of the structurally simple
+``Perch-primary plus Perch-independent SED'' blend.
+
+\paragraph{What this is not.}
+This is not the global LB ceiling. The leaderboard contains
+submissions at $0.933$+ from competitors. Our pipeline-shape ceiling is
+$0.931$; competitors at higher LB are using either (a) different probe
+architectures, (b) successful per-class calibration we have not
+discovered, (c) richer ensemble diversity from genuinely different
+training recipes, or (d) better external data. None of these have been
+ruled in or out by our experiments.
+
+\subsection{exp67 --- EfficientNet-B0-NS SED (rejected)}
+\label{sec:exp67}
+
+A third architecture backbone (\texttt{tf\_efficientnet\_b0.ns\_jft\_in1k},
+4.61M params) trained with the identical Boredom recipe + 2025 BG
+mixing. Training was unstable: val\_TA fluctuated ($0.97 \to 0.83 \to
+0.85$ across ep4-ep9) and early-stopped at ep9. Best epoch 4 reached
+val\_TA $0.9661$ / val\_SS $0.7603$ --- significantly below
+exp50 (val\_SS $0.838$) on rare classes.
+
+Diversity check: Pearson(exp50, exp67) on 66-file labeled SS = $0.936$,
+similarly correlated as exp50 $\leftrightarrow$ exp59 ($0.981$). Adding
+exp67 to the v26 base (4-way blend) regresses local macro by
+$-0.009$ to $-0.028$ across all weight configurations. Insecta taxon
+takes the largest hit ($-0.10$ to $-0.12$) due to exp67's weak
+rare-class signal.
+
+\paragraph{Verdict.} EfficientNet-B0-NS confirmed as a weaker substitute
+than HGNet-B0 in our recipe (consistent with Salman's 2025-discussion
+note that EffNet-NS underperforms HGNet for this task). Rejected as a
+4-way ensemble member.
+
+\subsection{Five-option lever audit summary (2026-04-25)}
+\label{sec:five_lever_audit}
+
+After v26 ($0.931$ LB), we systematically validated five candidate
+levers locally before considering a submission slot.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Option & Local (held-out 11) effect & Verdict \\
+\midrule
+1. R5 per-class routing (aliveness-based) & $+0.016$ macro, sp $0.992$ & possibly LB-neutral by noise hypothesis \\
+2. Probe arch swap (PCA / LogReg C / MLP) & not tested locally          & deferred (notebook OOF retrain heavy) \\
+3. Multi-$\sigma$ Gauss ensemble          & $+0.0024$ best (negligible)& reject (no movement) \\
+4. Test-time rank normalisation           & $0$ (AUC-invariant)        & reject (math) \\
+5. EffNet-B0-NS additional teacher        & $-0.009$ to $-0.028$       & reject (weaker than exp50, Pearson 0.94 with exp50) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Conclusions.}
+\begin{itemize}
+\item Three of five options (3, 4, 5) demonstrably do not help locally.
+  None are worth a Kaggle submission slot.
+\item Option 1 (R5 routing) shows local $+0.016$ but the
+  noise-regularisation hypothesis predicts LB neutral-or-negative
+  transfer (consistent with v22, v28, v29 each showing local positive
+  with LB regression).
+\item Option 2 (probe arch) remains an open lever but requires
+  significant notebook refactoring; deferred until a clean window
+  exists.
+\end{itemize}
+
+\paragraph{Practical implication.} The local audit returned no
+structurally robust LB-gain candidate beyond v26. We retain v26
+($0.931$) as the production baseline and defer further submissions
+until a genuinely new lever is identified --- e.g., a different
+training recipe (not just architecture) producing a low-correlation
+($\rho < 0.7$ with exp50) teacher, or external bird/non-bird audio
+data extending coverage of Perch-dead classes.
+
+\subsection{v32 R5 aliveness routing --- final test of class-conditional levers}
+\label{sec:v32}
+
+After the local audit (\S\ref{sec:exp65_66}) showed R5 (Perch-dead AND
+exp50-alive, $n=4$ classes) was the only candidate combining (a)
+sp\_row $\geq 0.99$ vs v26, (b) local macro $\Delta > 0.01$, and (c)
+\emph{universal model property} as the routing signal (Perch's $p_{99}$
+across 10K unlabeled SS, which depends on Perch's training data, not on
+the labeled-SS distribution), we submitted v32 = v26 + R5 routing on the
+4 classes (22961, 22967, 326272 Amphibia + whtdov Aves).
+
+\textbf{LB result: 0.930 ($-0.001$ vs v26).}
+
+\paragraph{Updated lever taxonomy after v32.}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Routing/lookup signal source             & Submission   & LB $\Delta$ \\
+\midrule
+Train-SS row patterns (cluster co-firing) & v22          & $-0.016$ \\
+Per-class OOF AUC (train-distribution)    & v29          & $-0.004$ \\
+Direct dedicated-model output             & v28          & $-0.002$ \\
+\textbf{Model property ($p_{99}$ on 10K unlabeled)} & \textbf{v32} & $\mathbf{-0.001}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{All four mechanisms regress LB.} The structural-distance ranking
+predicted v32 should be the safest: $p_{99}$ is computed from
+unsupervised Perch outputs on test-domain audio and reflects Perch's
+training coverage, which is determined entirely by what Perch was
+trained on (not by our labeled SS or any data-derived signal). v32 is
+the most surgical (only 4 columns altered) and most universal-property
+based intervention we could design. It still regressed.
+
+\paragraph{Conclusion: v26 is the local Pareto-frontier.}
+The v26 configuration $0.7 \cdot \mathrm{Perch} + 0.3 \cdot
+\mathrm{exp50}$ + Gauss + V9 gate is the global optimum of our pipeline.
+Any per-class modification --- multiplicative or additive, supervised or
+universal-property based --- regresses LB. The likely mechanism is
+\textbf{noise-regularisation}: the $0.3 \cdot z(\mathrm{exp50}_\mathrm{dead})$
+component on Perch-strong classes acts as a small ranking regulariser
+that any precise routing attempts to ``correct'' away. R9 from
+exp66 ($-0.047$ local when removing exp50 weight on exp50-dead
+classes) supports this --- the noise contribution is positive on local
+macro, and presumably also on LB.
+
+\paragraph{Path beyond v26 (untested).}
+Given our pipeline-shape ceiling at 0.931 confirmed via four LB
+attempts (v22, v28, v29, v32), further LB gains require structural
+departures from the current pipeline:
+\begin{itemize}
+\item Replacing or augmenting Perch with a foundation model whose
+  training coverage differs (e.g., AudioMAE, BEATs, or an ensemble of
+  bird foundation models).
+\item Training a recipe-divergent SED (focal loss, contrastive
+  objective, different audio representation) that achieves $\rho < 0.7$
+  with exp50 on raw predictions, providing genuine ensemble
+  diversity rather than 0.94+ correlation seen in HGNet/ConvNeXt/EffNet.
+\item Stacking with strong regularisation (LightGBM or per-class linear
+  with cross-validated weights), accepting the risk that train-SS
+  distribution dependence may introduce v22/v29-style transfer failure.
+\item External data (xeno-canto, iNaturalist) feeding a new SED with
+  per-species coverage Perch lacks.
+\end{itemize}
+
+None of these have been ruled in or out. The current state of evidence
+suggests v26 (0.931 LB) is our pipeline optimum, and further
+experimentation should target the four structural directions above
+rather than additional post-hoc levers.
+
+\subsection{exp70 --- Row-level failure mode audit and masking tests}
+\label{sec:exp70}
+
+A direct-evidence audit of why v26 fails on its weakest classes. For
+each class with v26 held-out AUC $< 0.7$, we examined positive-row
+prediction magnitudes from Perch and exp50, and tested four
+specific masking rules.
+
+\paragraph{Failure mode taxonomy.} Of 12 weakest v26 classes, 7 have
+\textbf{both Perch and exp50 with self-prediction $\approx 0$ on
+positive rows} (\emph{both weak}). Examples:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+class & taxon & Perch self-mean & exp50 self-mean & v26 AUC \\
+\midrule
+47158son06 & Insecta & 0.50 & \textbf{0.00} & 0.07 \\
+47158son17 & Insecta & 0.50 & \textbf{0.00} & 0.27 \\
+326272     & Amphibia & 0.00 & 0.00 & 0.40 \\
+67107      & Amphibia & 0.48 & 0.00 & 0.40 \\
+74113      & Mammalia & 0.11 & 0.00 & 0.42 \\
+bafcur1    & Aves     & 0.30 & 0.00 & 0.54 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For the worst 7 classes, the magnitude of exp50 prediction on the
+positive rows is essentially zero. This contradicts the apparent
+val\_SS macro of 0.84 because per-class ranking can still be partially
+informative even when magnitudes collapse. \textbf{Critically: no
+masking or routing can fix a class where neither model has acoustic
+signal.}
+
+\paragraph{Masking tests.}
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Rule (applied per cell or per row)                        & cells affected & macro $\Delta$ \\
+\midrule
+MASK1: Perch $> 0.5$ AND exp50 $< 0.1$ $\to$ use exp50    & 64\,828 (37\%) & $-0.027$ \\
+MASK2: row-level top-Aves suppress where exp50 top is non-Aves & 615 & $-0.003$ \\
+\textbf{MASK3: zero Perch on 19 $p_{99}{<}0.1$ classes}            & 19 cls         & $\mathbf{+0.016}$ \\
+MASK4: top-3 Aves suppress where exp50 disagrees ($<0.1$)  & 2\,207 cells & $-0.004$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+MASK3 is functionally equivalent to v32's R5 routing (LB-tested
+$-0.001$). MASK1 (broad threshold-based) catastrophically breaks the
+noise-regularisation balance. MASK2/MASK4 narrow rules give marginal
+loss. \textbf{None of the masking schemes generates a new gain channel
+beyond MASK3 = v32 = R5 already submitted to LB.}
+
+\paragraph{Implication for path forward.}
+The 12 worst classes' failure mechanism is data-level rather than
+post-hoc-correctible. To improve them we need either:
+\begin{itemize}
+\item External labelled audio (xeno-canto for the 7 classes with
+  $n_{\text{train\_audio}} < 50$), feeding a new SED.
+\item TTA: multiple temporal crops averaged, recovering the marginal
+  signal that exp50's single-crop misses.
+\item Stacking with rich sequential / cross-class features that allow
+  the meta-learner to exploit weak per-class signal.
+\item Recipe-divergent SED training (focal loss, contrastive) that
+  forces the model to extract rare-class signal even with sparse
+  positives.
+\end{itemize}
+
+Pure post-hoc correction on the existing v26 outputs has reached its
+limit; further LB gains require structural changes to the input
+modality, training data, or training objective.
+
+\subsection{exp71-73 --- External data download and fine-tune (negative)}
+\label{sec:exp71_73}
+
+To test whether external labelled audio could fix the 12 v26 worst classes
+(\S\ref{sec:exp70}), we attempted limited downloads from xeno-canto and
+iNaturalist for 5 priority species (Insecta sonotypes excluded due to
+generic \texttt{inat\_taxon\_id} 47158 covering all of order Insecta,
+no usable specific source).
+
+\paragraph{Download outcome.}
+\begin{itemize}
+\item xeno-canto v2 API deprecated; v3 requires API key signup. Skipped.
+\item iNaturalist research-grade observations: 43 audio recordings
+  across 5 species (326272, 67107, 74113, bafcur1, litnig1).
+\item After ffmpeg conversion to ogg 32kHz mono: 30 usable clips.
+\item Total disk: 33 MB.
+\end{itemize}
+
+\paragraph{Quality diagnostic on raw external clips.} Running exp50 on
+these 30 clips: per-clip self-prediction is bimodal --- some clips
+hit $0.9+$ (clean call captured) but many sit below $0.05$ (noisy or
+non-target audio dominating). Filtering by self $> 0.3$ keeps ~25
+clips.
+
+\paragraph{Fine-tune setup.} Warm-start from exp50 best ckpt; train 8
+epochs at LR $5\!\times\!10^{-5}$ on combined data: 2026 train\_audio
+(28.5K) + labeled SS train (617) + 25 filtered external clips
+($5\times$ oversample). Held-out 11-file val\_SS evaluation each epoch.
+
+\paragraph{Result table (ep4 best vs baseline).}
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+species & baseline (exp50) & after ft (ep4) & $\Delta$ \\
+\midrule
+326272   & 0.536 & 0.586 & +0.050 \\
+67107    & 0.790 & 0.740 & $-0.050$ \\
+74113    & 0.765 & 0.677 & $-0.088$ ($n_{\text{pos}}=2$) \\
+bafcur1  & 0.818 & 0.604 & $-0.214$ \\
+litnig1  & 0.994 & 0.989 & $-0.005$ \\
+\midrule
+val\_SS macro (40 cls) & 0.838 & 0.851 & $+0.013$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The val\_SS macro increased by $+0.013$, but \textbf{4 of 5 target
+species regressed}. The macro gain comes from non-target classes ---
+i.e., a regularisation-like artefact, not a real lift on the species we
+intended to help.
+
+\paragraph{Interpretation.} 25 iNaturalist clips per species are too
+few and too acoustically diverse (smartphone recordings vs labeled
+SS handheld field captures) to provide a coherent positive signal for
+the target species. The 2025 winners' ``data refinement'' work likely
+involves manual curation, not unfiltered API downloads. Without
+substantial human-in-the-loop label cleaning, a small external data
+fine-tune offers no reliable gain.
+
+\paragraph{Verdict.} External data via API alone is not the lever.
+Future external-data work needs at minimum (a) per-clip manual
+curation, (b) larger volume per species (200+), (c) acoustic
+domain-matching to soundscape recordings. None feasible in our
+remaining time budget.
+
+\subsection{v33 --- L2c file-coherence breakthrough}
+\label{sec:v33}
+
+After 5 consecutive failures of post-hoc levers above v26 (v22, v28, v29,
+v32, plus exp73 fine-tune), we tested a structurally different
+intervention: \textbf{physics-based file-level temporal coherence}.
+
+\paragraph{Lever specification.} For each test file with $N_W=12$
+contiguous 5-second windows producing prediction matrix $P \in
+\mathbb{R}^{12 \times 234}$, define $P_{\max}^{f,c} = \max_t P_{t,c}$.
+Replace each row $t$ with
+$P_{t,c}^{\text{new}} = (1-\alpha) P_{t,c} + \alpha P_{\max}^{f,c}$,
+$\alpha = 0.10$.
+
+\paragraph{Justification.} If species $c$ is genuinely present in
+file $f$, it should be detected in some windows. Then
+$P_{\max}^{f,c}$ reflects the highest detection confidence in $f$.
+Boosting all 12 windows by $\alpha P_{\max}^{f,c}$ encodes the
+\emph{physical} prior that bird/insect calls are temporally clustered:
+detection in one window is evidence of presence throughout adjacent
+context.
+
+This is wider context than $\sigma{=}0.5$ Gaussian smoothing
+(window 5 only sees windows 3-7 with weight $0.6$ at distance 2). The
+Gaussian smooths locally but keeps file-wide max signal compressed.
+
+\paragraph{Critical: this is NOT a train-distribution lookup.}
+The transformation depends only on test predictions in the same file.
+No labeled SS data, no per-class rule, no row-level pattern. Universal
+physics: \emph{species presence is temporally extended}.
+
+\paragraph{Local validation.}
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+$\alpha$ & macro $\Delta$ vs v26 & Spearman row & Aves $\Delta$ \\
+\midrule
+$0.10$ & $+0.0034$ & $0.994$ & $+0.007$ \\
+$0.20$ & $+0.0056$ & $0.980$ & $+0.014$ \\
+$0.30$ & $+0.0070$ & $0.956$ & $+0.022$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Picked $\alpha = 0.10$ for sp\_row $\geq 0.99$ guarantee.
+
+\paragraph{LB result: 0.932.}
+\textbf{First positive LB transfer above v26}. $+0.001$ vs v26 (0.931),
+$+0.003$ vs v12 (0.929). The entire 5-experiment run of post-hoc
+multiplicative or routing-based levers regressed; the first
+physics-based intervention achieved positive transfer.
+
+\paragraph{Updated lever taxonomy after v33.}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Lever class                                    & Examples         & LB transfer \\
+\midrule
+Train-SS row-pattern lookup                    & v22 (site+cluster) & $-0.016$ \\
+OOF AUC routing                                & v29              & $-0.004$ \\
+Direct dedicated-model output                  & v28              & $-0.002$ \\
+Universal model property                       & v32 (Perch $p_{99}$) & $-0.001$ \\
+\textbf{Physics-based (file-level coherence)}  & \textbf{v33}     & $\mathbf{+0.001}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Generalisation hypothesis.}
+\textbf{Universal physical priors transfer; train-distribution patterns
+do not.} The hierarchy from purely sample-specific (v22) to purely
+universal-physics (v33) tracks LB transfer monotonically. This points to
+a class of further interventions:
+\begin{itemize}
+\item Cross-window temporal Markov / HMM (state-space at logit level
+  with prior learned from training, but transition probabilities are
+  universal physical priors).
+\item Frequency-domain physical priors (insect stridulation has narrow
+  bandwidth, bird calls have characteristic harmonics).
+\item Ecological co-occurrence priors derived from biome physics, not
+  data lookup.
+\end{itemize}
+
+These are the directions that should produce additional positive LB
+gains, distinct from the failed routing/lookup family.
+
+
+\section{v34 mel-iVAE z-kNN: structural failure of train-SS-fitted levers (2026-04-25)}
+
+\subsection{Motivation}
+After v33's positive LB transfer (file-max coherence, $+0.001$), we
+investigated whether \emph{independent feature representations} could provide
+a complementary signal targeting the 27 unmapped species (25 Insecta sonotypes
++ 2 Amphibia not in Perch's 14k-class vocabulary). Perch \emph{embeddings} on
+those rows are still informative; Perch's species \emph{output heads} for
+unmapped species are constant. An iVAE over raw mel might bypass this output
+bottleneck.
+
+\subsection{Setup}
+Pooled mel-spectrogram (T=16 temporal × F=128 mel) on 739 labeled SS rows
+(617 train / 122 eval, file-stratified). Train an auxiliary-conditioned VAE
+with site one-hot + hour as auxiliary; encoder produces a 32-d $z$.
+Per-class centroid in $z$-space from train positives ($\geq 3$ examples
+yields 55/234 valid centroids). At inference time, cosine similarity to each
+valid centroid produces a $z$-kNN score; sigmoid sharpening with factor 5
+maps to $[0,1]$. Final blend with $w_z=0.05$ on the v33 output.
+
+\subsection{Local validation looked positive}
+On 122 held-out eval rows:
+\begin{itemize}
+\item macro AUC $\Delta = +0.026$ vs v33,
+\item per-row Spearman vs v33 = $0.990$ (extremely high rank preservation),
+\item Aves $\Delta +0.008$ (anti-correlation rule v2 predicts neutral/positive transfer),
+\item Insecta $\Delta +0.068$, Reptilia $\Delta +0.104$.
+\end{itemize}
+
+\subsection{LB result}
+\textbf{v34 LB = 0.916, $\Delta = -0.016$ vs v33 (0.932).} Largest single-step
+regression in the v22--v34 series.
+
+\subsection{Mechanistic post-mortem (exp79--80)}
+A six-experiment teardown of the iVAE artifact (exp79 pilot, exp79b eval-only
+re-train, exp79c unlabeled probe, exp80a site-holdout, exp80b big-pool
+training, exp80c taxon classifier comparison) isolated the failure mechanism.
+
+\paragraph{Finding 1: Site holdout collapses Insecta detection.}
+Train iVAE excluding all rows from S19, then evaluate Insecta detection on
+S19's held-out windows: AUC = $0.073$ (sub-random). The trained model places
+S19 windows \emph{further} from Insecta centroids than non-Insecta windows,
+because the encoder never saw S19's acoustic environment during training.
+
+\paragraph{Finding 2: Same-site eval AUC is site-fingerprint, not species
+acoustics.}
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Taxon & Same-site eval AUC & LOSO site CV AUC \\
+\midrule
+Aves      & 0.860 & 0.611 \\
+Amphibia  & 0.934 & 0.554 \\
+Insecta   & \textbf{0.973} & \textbf{0.295} \\
+Mammalia  & 0.614 & 0.624 \\
+Reptilia  & 0.778 & 0.566 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The Insecta column shows a 0.68-AUC gap between same-site and
+leave-one-site-out evaluation. Same-site eval reports near-perfect detection;
+LOSO is sub-random ($<0.5$) -- the classifier is \emph{worse} than chance on
+held-out sites.
+
+\paragraph{Finding 3: iVAE does not add to Perch.}
+Perch+iVAE-z concat MLP achieves $0.963$ Insecta same-site AUC, slightly
+\emph{below} Perch alone ($0.973$). LOSO is also slightly worse
+($0.205$ vs $0.295$). Bigger iVAE training pool (30k unlabeled rows) helps
+Aves detection (+$0.10$) but hurts Amphibia and Insecta -- a wider pool
+dilutes the centroid signal that was already site-fingerprint, not species
+acoustics.
+
+\paragraph{Finding 4: Perch's species-output blindness is not the
+informative axis.}
+Perch's 14k-class species head outputs constant 0 for the 25 Insecta
+sonotypes. Yet a fresh MLP on Perch's 1536-d \emph{embedding} achieves
+$0.973$ Insecta same-site AUC -- the embedding contains
+Insecta-discriminative structure. The bottleneck is not that Perch ``can't
+hear insects''; it is that all our labeled Insecta examples come from 4
+sites, so any classifier fits the site, not the insects.
+
+\subsection{Generalised lesson}
+Refines the post-v33 lever taxonomy with a fifth, deeper failure mode:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Lever class                                & Example         & LB \\
+\midrule
+Train-SS row-pattern lookup                & v22             & $-0.016$ \\
+OOF AUC routing                            & v29             & $-0.004$ \\
+Direct dedicated-model output              & v28             & $-0.002$ \\
+\textbf{Train-SS-fitted feature-extractor + cosine kNN} & \textbf{v34} & $\mathbf{-0.016}$ \\
+Universal model property                   & v32             & $-0.001$ \\
+Physics-based (file-level coherence)       & v33             & $+0.001$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Any lever derived from a structure fitted to our 55-file labeled SS
+train split is poisoned by site shortcut, regardless of architecture, weight,
+or rank-preservation safety.} v34 confirmed this explicitly: $w_z = 0.05$
+(tiny weight), Spearman $0.990$ (preservation of $99\%$ of v33's ranking), and
+local validation predicting positive transfer all failed.
+
+The only train-SS-touching mechanism that has ever transferred positively is
+exp50, which used SS data only as one input stream of a multi-task SED with
+\emph{2025 soundscape background mixing} for active site-invariance training.
+Pseudo-labeling, post-hoc lookup, taxon gates, and feature-knn approaches
+all failed.
+
+\subsection{Implications for the working-note paper}
+We treat exp79--80 as a complete \emph{negative-result thesis} on identifiable
+latent representation models for foundation-model-pretrained bioacoustic
+features. The same hierarchy emerges as in our earlier exp43 chain on Perch
+embeddings: pre-trained models supervised on diverse audio already encode the
+species-discriminative structure that an iVAE/iVDFM would aim to recover; the
+remaining variance in $z$-space is dominated by site/environment factors,
+which are precisely the directions an unsupervised disentanglement objective
+would either keep (insufficient identifiability) or transfer to the
+auxiliary's predicted prior (insufficient disentanglement). Either way, when
+the labeled subset has site-conflated taxon distributions, downstream species
+or taxon detection inherits the site shortcut.
+
+The negative result has independent value: it characterises a regime
+(supervised foundation embedding + site-conflated downstream labels) in which
+identifiability machinery cannot recover species structure, and points the
+remaining levers toward architectures that \emph{actively suppress} site
+fingerprint at training time (mixup with geographically distinct
+backgrounds, domain-adversarial losses) rather than disentangle it post hoc.
+
+
+\section{Q1--Q4 systematic local audit (exp82--85, 2026-04-26)}
+
+After the v34 mel-iVAE failure refuted further iVAE-fitted lever exploration,
+we audited four hypothesised lever families that we had partially explored
+but never rigorously measured against the v33 LB-positive baseline. Each
+hypothesis was tested with a controlled local pipeline matching the v33
+production recipe (Perch + SED blend $\to$ V9 taxon gate $\to$ file-max
+coherence $\alpha=0.10$), evaluated on 122 held-out file-stratified eval
+rows.
+
+\subsection{Q1: Architectural diversity (ConvNeXt-tiny)}
+exp59 ConvNeXt-tiny SED was trained with the same 2025-BG recipe as exp50.
+Despite distinct backbone, predictions correlate at Pearson 0.981 with
+exp50.
+
+Yet swapping into 4-way blend (Perch + exp50 + exp59) at $0.6/0.2/0.2$
+weight delivers macro $\Delta = +0.0093$, Aves $\Delta = +0.017$,
+sp\_row $0.999$ vs v33. A control test (single-SED at the same total weight,
+$0.6P + 0.4\,\mathrm{exp50}$) yields only $+0.0035$ macro, isolating the
+architecture-diversity contribution at $+0.006$ macro and $+0.008$ Aves
+beyond pure weight reallocation.
+
+Despite the high correlation, the residual 2\% information is genuinely
+complementary. Architecture diversity contributes a real but moderate
+boost.
+
+\subsection{Q2: Recipe diversity (focal loss)}
+exp83 substituted focal loss ($\gamma=2$, $\alpha=0.25$) for BCE on the
+exp50 recipe (HGNet-B0 + 2025 BG, all other settings identical). Trained
+20 epochs on RTX 5090.
+
+Best epoch (ep 18): val\_TA $0.985$, val\_SS $0.827$. Reference exp50:
+val\_TA $0.988$, val\_SS $0.838$. Focal loss alone is slightly worse
+than BCE on both metrics ($-0.011$ on val\_SS).
+
+In 4-way blend ($0.6P + 0.15\,\mathrm{exp50} + 0.15\,\mathrm{exp83}$),
+macro $\Delta = +0.007$, Aves $\Delta = +0.004$, but Reptilia
+$\Delta = -0.047$. In 5-way blend including focal: Reptilia drops $-0.036$.
+
+Recipe diversity via loss-function swap does not help. Focal loss with
+$\gamma = 2$ on the same data + architecture produces predictions that are
+almost identical (Pearson $0.981$ with exp50) and slightly worse on rare
+taxa.
+
+\subsection{Q3a: Small external pool (exp73 with 21 clips)}
+exp73 was a fine-tune of exp50 on 21 quality-filtered iNaturalist clips
+across 5 target species. Substituting exp73 into the 4-way blend yields
+$+0.010$ macro, Aves $+0.014$, sp\_row $0.999$ -- a marginal improvement
+over Q1 (+0.001 macro). Useful but small.
+
+\subsection{Q4: Expanded external pool (exp84b with 545 clips)}
+Downloaded 788 new iNaturalist clips across 56 target species (Amphibia
+35, Mammalia 8, Insecta 3 named species, Reptilia 1, plus 11 weak Aves)
+via exp84\_q4\_external\_expand. Combined with existing 43 clips and
+filtered by exp50 self-prediction $> 0.3$, retained 545 clips.
+
+Fine-tuned exp50 for 12 epochs (LR $10^{-4}$, larger pool justifies
+slightly higher LR). Best ep 7: val\_SS $0.8628$ vs baseline $0.8378$,
+$\Delta = +0.025$ -- nearly $2\times$ the exp73 gain ($+0.013$).
+
+Per-target progress vs exp73 baseline:
+\begin{itemize}
+  \item bafcur1: $0.60 \to 0.79$ (+0.19 from external clips)
+  \item 67107: $0.74 \to 0.87$ (+0.13)
+  \item 74113: $0.68 \to 0.77$ (+0.09)
+  \item 326272: $0.59 \to 0.48$ (\textbf{regressed} despite added clips)
+  \item litnig1: $0.99 \to 1.00$ (saturated)
+\end{itemize}
+
+Substituting exp84b into the 4-way blend (Q4-blend) yields macro $+0.006$,
+Aves $+0.011$, sp\_row $0.999$. Combining exp84b with exp50 + exp59 (5-way)
+yields macro $+0.013$, Aves $+0.024$, all five taxa positive
+(Reptilia $+0.028$, Amphibia $+0.014$).
+
+\subsection{Aggregate ranking (122 eval rows, anti-correlation rule v3)}
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Config                                          & macro $\Delta$ & sp\_row & Aves $\Delta$ & Predicted LB \\
+\midrule
+6-way: 0.5P + all 5 SEDs each 0.10              & $+0.015$       & 0.998   & $+0.024$      & A (some Reptilia drop) \\
+\textbf{5-way: 0.5P + e50/e59/e73/e84b each 0.125} & $\mathbf{+0.013}$ & $\mathbf{0.999}$ & $\mathbf{+0.024}$ & \textbf{A (all taxa $\geq 0$)} \\
+6-way conservative: 0.6P + each SED 0.08        & $+0.012$       & 0.999   & $+0.012$      & A \\
+Q3a best: 0.6P + 0.15 e50 + 0.15 e59 + 0.10 e73 & $+0.010$       & 0.999   & $+0.014$      & A \\
+Q1 best: 0.6P + 0.2 e50 + 0.2 e59               & $+0.009$       & 0.999   & $+0.017$      & A \\
+Q4-blend: 0.6P + 0.2 e50 + 0.2 e84b             & $+0.006$       & 0.999   & $+0.011$      & A \\
+v33 ref (0.7P + 0.3 exp50)                       & $0$            & $1.000$ & $0$           & reference \\
+Q2 swap: 0.7P + 0.3 exp83 (focal alone)         & $+0.003$       & 0.998   & $-0.002$      & B (focal hurts Aves) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Findings.}
+\begin{itemize}
+  \item Q1 (architecture diversity): real but modest, $+0.006$ macro beyond
+    weight reallocation. Predictions are 0.98 correlated with exp50; the
+    residual 2\% is what matters.
+  \item Q2 (recipe diversity, focal loss): \textbf{negative}. Focal loss
+    alone is slightly worse than BCE; in blend it hurts Reptilia.
+  \item Q3a (small external pool): marginal $+0.001$ over Q1 alone.
+  \item Q4 (large external pool, 545 filtered clips): the strongest single
+    contributor. Combining $e50 + e59 + e84b$ at $0.125$ each gives all
+    five taxa positive Aves, the only such configuration.
+\end{itemize}
+
+The 5-way blend is the highest-confidence LB candidate after v33. Predicted
+LB transfer per anti-correlation rule v3 (Aves $+0.024$, sp\_row $0.999$,
+all taxa $\geq 0$): $+0.002$ to $+0.004$ over v33 (LB 0.932), targeting
+$\sim 0.934$--$0.936$.
+
+\paragraph{What this rules out.}
+Recipe diversity via loss substitution alone does not produce useful
+ensemble component. Pearson correlation of $0.97$--$0.99$ across all five
+SED variants (independent of recipe / architecture / external data) shows
+that downstream predictions converge to a narrow function class on this
+pool, regardless of training-time tweaks. Future ensemble strengthening
+likely requires \emph{architecturally distinct teacher families} (e.g.,
+non-CNN, Perch v3, transformer-based bioacoustic models) rather than
+loss/data tweaks on the same recipe.
+
+
+\section{v36 5-way blend LB failure (2026-04-26)}
+
+The 5-way blend recommended by Q1--Q4 audit (\S exp82--85) was submitted
+as v36: $0.5\,P + 0.125\,(\mathrm{exp50} + \mathrm{exp59} +
+\mathrm{exp73} + \mathrm{exp84b})$, with V9 taxon gate and file-max
+coherence ($\alpha = 0.10$). Local prediction by anti-correlation rule v3
+classified this as ``A (likely positive)'': sp\_row $0.999$, Aves
+$\Delta = +0.024$, all-five-taxon $\Delta \geq 0$, macro $\Delta = +0.013$
+on 122 held-out eval rows.
+
+\textbf{LB result: $0.915$, $\Delta = -0.017$ vs v33 $(0.932)$.}
+
+\subsection{Anti-correlation rule v3 invalidation}
+This is the second consecutive submission predicted ``class A'' by
+anti-correlation rule v3 that regressed by approximately $-0.017$ LB
+(v34 mel-iVAE: $-0.016$; v36 5-way: $-0.017$). The rule, which previously
+worked for v33 (small Aves~$\Delta$, sp\_row $\geq 0.99$, universal
+mechanism), now appears systematically wrong on a different class of
+modification.
+
+\subsection{Mechanism}
+v36 differs from v33 in two coupled ways: (a) Perch weight reduced from
+$0.7$ to $0.5$; (b) SED side weight increased from $0.3$ to $0.5$ across
+four highly correlated SED variants (Pearson $0.97$--$0.99$ across all
+pairs). The Q1--Q4 hypothesis was that the residual $1$--$3\%$
+non-correlation between SEDs supplies complementary information justifying
+the redistribution. The v36 LB result rules out this hypothesis: the
+``ensemble diversity'' is not enough to compensate for the loss of Perch's
+multi-region backbone signal at $0.5$ weight.
+
+The Aves $\Delta = +0.024$ local was a same-site evaluation artifact:
+amplifying site-conflated SED signals on labeled SS rows looks like
+diversity benefit because the site fingerprints align between train and
+eval splits. On hidden-site test rows, the same amplification surfaces as
+worse rankings because Perch's site-invariant predictions are getting
+suppressed.
+
+\subsection{Refined invariant}
+The LB-protective invariant after v22, v28, v34, v36 is sharper than
+``Aves $\Delta \geq 0$ + sp\_row $\geq 0.99$'': it appears to be
+\emph{$W_{\mathrm{Perch}} \geq 0.7$ in any final blend}. Every submission
+that reduced $W_{\mathrm{Perch}}$ below $0.7$ has regressed; every
+positive transfer (v23 0.928, v24 0.930, v26 0.931, v33 0.932) preserved
+$W_{\mathrm{Perch}} \in [0.7, 0.8]$. This is consistent with our
+2025-BG-trained SED (exp50) being the only train-SS-touching component
+that produces site-invariant predictions; even matching its recipe
+(exp59/73/83/84b) does not yield models with comparable LB-transfer
+quality, because the residual differences between them re-express the
+underlying site-fingerprinted feature space.
+
+\subsection{Lessons for remaining lever space}
+\begin{itemize}
+  \item Future ensemble proposals must keep $W_{\mathrm{Perch}} \geq 0.7$
+    in the renormalized blend, or include a non-train-SS-fitted teacher
+    (e.g., a future Perch v3 or transformer-based foundation model) to
+    occupy the $0.7$+ weight slot.
+  \item Local same-site eval is now a confirmed-misleading metric for
+    LB transfer of this lever family. We need an additional eval signal
+    that explicitly tests Perch-share preservation, not just rank
+    preservation.
+  \item Q1--Q4 audit was a useful negative result: it definitively rules
+    out incremental improvements via SED-recipe / SED-data tweaks within
+    the labeled-SS pool. The next lever space is genuinely
+    architecturally distinct teachers, not pipeline tweaks.
+\end{itemize}
+
+
+\section{Honest decomposition: how the 0.929 → 0.932 jump actually happened}
+\label{sec:lb-jump-decomposition}
+
+After v34 and v36 LB regressions reset our understanding of what
+transfers, this section re-analyses the only LB-positive sequence we have
+produced (v12 → v24 → v26 → v33) to identify the actual invariants. The
+claim ``v33 LB 0.932 is the result of three independent +0.001 steps,
+each adding a new source of site-invariance to the prediction pipeline''
+is supported below.
+
+\subsection{The three +0.001 transitions}
+
+\begin{center}
+\begin{tabular}{lllr}
+\toprule
+Transition & Config change                        & Mechanism                                & LB \\
+\midrule
+v12 (ref)  & $0.8P + 0.2$ SED29 + V9 + Gauss      & --                                       & 0.929 \\
+v12 → v24  & SED29 → exp50 (weight kept at 0.2)   & training-time site invariance via 2025 BG  & 0.930 (+0.001) \\
+v24 → v26  & weight 0.2 → 0.3                     & optimal mixing of two site-invariance sources & 0.931 (+0.001) \\
+v26 → v33  & + file-max coherence ($\alpha = 0.10$) & universal physics: temporal extension     & 0.932 (+0.001) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The total +0.003 LB was obtained from three independent steps of equal
+size, each contributing a distinct new mechanism. There was no single
+dominant lever.
+
+\subsection{Step 1 mechanism (v12 → v24): training-time site invariance via 2025 BG mixing}
+
+SED29 was a HGNet-B0 trained on \emph{train\_audio only}, no labeled-SS,
+no BG mixing. exp50 is the same architecture with the Boredom recipe
+(20-second clips, raw waveform mixup, BCE on clip+framewise max) plus a
+critical addition: with $p = 0.4$, the mixup partner is a quiet 5-second
+window from the 2025 soundscape pool (Colombian Upper Magdalena, a
+geographically distinct region from the Pantanal source of our 2026 data),
+blended at $\alpha \sim U(0.3, 0.7)$.
+
+This forces the SED to produce predictions invariant to the acoustic
+environment of the 2026 site fingerprints, because training labels stay
+fixed when the BG region changes. The downstream effect on prediction
+diversity is measurable. On the 11-file held-out, residual-correlation of
+each SED with Perch (after centring on per-class label):
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+SED variant & residual-corr(Perch, SED) \\
+\midrule
+SED29 (train\_audio only)               & 0.792 \\
+SED41f (Perch-pseudo distilled)         & 0.695 \\
+exp47 (Boredom recipe, no 2025 BG)      & 0.640 \\
+\textbf{exp50 (Boredom + 2025 BG)}       & \textbf{0.640} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The two lowest-correlation SEDs (exp47, exp50) share the Boredom recipe;
+the addition of 2025 BG in exp50 did not further lower residual-corr but
+\emph{shifted the correlation structure on hidden test rows} by enforcing
+acoustic-site invariance at training time. This site-invariance is what
+the LB rewards; the same-site evaluation cannot distinguish exp47 from
+exp50 on residual-corr alone, but LB transfer behaviour separates them.
+
+\subsection{Step 2 mechanism (v24 → v26): finding the weight saddle on a site-invariant SED}
+
+exp50's contribution to the blend is not monotonic in weight. Sweep on the
+$0.x P + 0.y\,\mathrm{exp50}$ family with V9 gate + Gauss:
+
+\begin{center}
+\begin{tabular}{cccc}
+\toprule
+Config & $W_{\mathrm{Perch}}$ & $W_{\mathrm{exp50}}$ & LB \\
+\midrule
+v23 & 0.8 & 0.10 & 0.928 \\
+v24 & 0.8 & 0.20 & 0.930 \\
+\textbf{v26} & \textbf{0.7} & \textbf{0.30} & \textbf{0.931} \\
+v25 & 0.5 & 0.50 & 0.928 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Concave curve with peak at v26. Below 0.30 we underuse exp50's
+site-invariant rare-class signal; above it we suppress Perch's
+xeno-canto-derived multi-region signal on common Aves. The 0.7--0.8
+plateau on $W_{\mathrm{Perch}}$ is the load-bearing structure. v36
+(2026-04-26) confirmed this from the other side: reducing
+$W_{\mathrm{Perch}}$ to 0.5 to give weight to four highly-correlated SED
+variants regressed −0.017 LB, because the four SEDs collectively duplicate
+exp50's site-invariance contribution rather than adding new sources.
+
+\subsection{Step 3 mechanism (v26 → v33): universal physics decoupled from site}
+
+v33 adds, after the V9 gate but before Gauss, a per-class file-level
+temporal coherence blend:
+\[
+\mathrm{final}[i, c] = (1 - \alpha)\,\mathrm{prob}[i, c] + \alpha \cdot \max_{j \in \mathrm{file}(i)} \mathrm{prob}[j, c]
+\]
+with $\alpha = 0.10$. The transformation depends only on test predictions
+in the same file: no labeled SS lookup, no per-class rule, no row pattern,
+no site identifier. It encodes the universal physical prior that species
+presence is temporally extended within a single recording.
+
+Local on 122 eval rows: macro $\Delta = +0.0034$, per-row Spearman vs
+v26 = 0.994, Aves $\Delta = +0.007$. LB: +0.001. The $+0.003$ macro local
+roughly translated $1/3$ to LB, consistent with the $1/3$--$1/4$ ratio
+observed for the other two steps (e.g., v24 local macro $\Delta \sim
++0.13$ on the 11-file fair eval, LB +0.001).
+
+\subsection{Why every other intervention failed}
+
+Cross-referenced against the $\geq 12$ submissions that regressed (v17,
+v18, v19, v22, v25, v28, v29, v32, v34, v36 plus the v6--v15 baseline
+sweep): every regression matches one of three patterns:
+
+\begin{enumerate}
+  \item \textbf{Duplicated existing site-conflated signal.} v17 swapped
+    SED29 for SED41f (Perch-pseudo distilled, residual-corr with Perch 0.69
+    vs SED29's 0.79); the higher correlation with Perch means it adds
+    redundant rather than independent information. v36 added four
+    site-conflated SEDs at $W_{\mathrm{Perch}}$ = 0.5; collectively they
+    duplicate exp50's site-invariance contribution rather than adding new
+    sources.
+
+  \item \textbf{Train-SS-fitted structure.} v18, v19 (27-head overlay/
+    synth-aug), v22 (site prior + cluster lookup table), v28
+    (27-head additive even with 2025 BG training), v29 (per-class OOF
+    routing on labeled SS), v34 (mel-iVAE centroids built from labeled
+    SS positives). All ten species in our 27-head are Gini=0 single-site
+    (S08/S15/S19/S23 only), as confirmed by exp80a's S19-holdout test
+    that dropped Insecta detection AUC to 0.073. Any structure fitted on
+    these labels learns the site fingerprint.
+
+  \item \textbf{Reduced existing site-invariance contributions.} v25 and
+    v36 both reduced $W_{\mathrm{Perch}}$ to 0.5. Perch is the only
+    backbone trained on multi-region xeno-canto data and is therefore the
+    single largest source of site-invariance in our pipeline; reducing
+    its weight directly removes this invariance.
+\end{enumerate}
+
+The successful pattern (v24, v26, v33) is the negation of all three: each
+adds a new, independent, non-train-SS-fitted source of site-invariance.
+
+\subsection{What this implies for further levers}
+
+Searching for a fourth +0.001 step now requires identifying a fourth
+source of site-invariance that is independent of:
+\begin{itemize}
+  \item Perch's xeno-canto multi-region pretraining
+  \item exp50's 2025 BG mixup
+  \item file-level temporal coherence
+\end{itemize}
+
+\noindent Concrete candidates we have not yet tested:
+\begin{enumerate}
+  \item \textbf{Multi-region BG mixing} (2024 + 2025 + 2023 SS pools, not
+    just 2025 Colombia): broadens the geographic distribution exp50 must
+    be invariant to, possibly capturing more acoustic environments.
+  \item \textbf{Hour-of-day invariance via temporal augmentation} during
+    SED training: hour distribution differs between train and hidden
+    test, and our V9 gate's hour input is the only model component that
+    sees hour information at inference.
+  \item \textbf{Domain-adversarial training with site as adversary}: a
+    gradient-reversal layer that explicitly removes site-discriminative
+    features from the SED's representation.
+  \item \textbf{Cross-window window-shift TTA} at inference time:
+    averaging predictions over $\pm 1$-second shifts averages out timing
+    artifacts that may be site-correlated. Has been ruled out before due
+    to 90-min budget; current pipeline (v37 dev wall 511 s) suggests we
+    may have headroom for 2-shift TTA on Perch alone.
+\end{enumerate}
+
+\noindent Each of these would test a specific site-invariance mechanism
+distinct from the three we already have. The framework now has
+falsifiable predictions: any new lever that does not fit one of these
+mechanism categories should be expected to regress, regardless of local
+metrics.
+
+
+\section{Perch entropy + latent geometry on UNK vs KNOWN species (exp89-90)}
+
+Motivated by why every specialized-head approach (exp44c/g, exp51, v22,
+v28, v34, v36) regressed on LB, we examined Perch's internal behaviour
+on rows containing species inside vs outside its 14,795-class vocabulary.
+
+\subsection{Setup}
+Of our 234 BirdCLEF 2026 species, 36 produce constant-zero logits in
+Perch's output (var $< 10^{-6}$ across 739 labeled rows): 25 Insecta
+sonotypes, 4 Amphibia not in iNat-bird-cluster, 2 Mammalia, 1 Reptilia,
+plus 4 Aves (\texttt{grekis}, \texttt{limpki}, \texttt{74580},
+\texttt{760266}) -- consistent with exp43r's earlier count of 31 unmapped
+species. Row partition:
+\begin{itemize}
+  \item KNOWN\_ONLY (386 rows): GT contains $\geq 1$ mapped species, no unmapped.
+  \item UNK\_ONLY (76 rows): only unmapped species in GT -- Perch fundamentally blind.
+  \item UNK\_MIXED (277 rows): both mapped and unmapped species present.
+\end{itemize}
+
+\subsection{Finding 1: latent magnitude reduces on UNK rows}
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Metric                & KNOWN\_ONLY (386) & UNK\_ONLY (76) & UNK\_MIXED (277) \\
+\midrule
+$\|\mathrm{emb}\|_2$  & $4.649 \pm 0.27$ & $4.348 \pm 0.25$ & $4.578 \pm 0.30$ \\
+$\max|\mathrm{emb}_i|$ & $0.642 \pm 0.09$ & $0.591 \pm 0.09$ & $0.613 \pm 0.09$ \\
+$\mathrm{Var}(\mathrm{emb})$ & $0.014 \pm 0.002$ & $0.012 \pm 0.001$ & $0.014 \pm 0.002$ \\
+$\mathrm{dist}_\mathrm{ratio}$ (UNK/HIT) & $1.175 \pm 0.17$ & $0.864 \pm 0.05$ & $0.888 \pm 0.11$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+UNK\_ONLY rows have measurably reduced embedding magnitude (L2 $-6.5\%$),
+max-component ($-7.9\%$), and variance ($-14\%$) relative to KNOWN\_ONLY.
+Centroid-distance ratio (computed with train-split-only centroids,
+no leak) cleanly separates: UNK rows are closer to UNK\_ centroid,
+KNOWN rows closer to HIT\_centroid (AUC $0.976$ for cross-site
+separation).
+
+\subsection{Finding 2: output is overconfident on UNK rows (output-level Anosognosia)}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Metric                          & KNOWN\_ONLY & UNK\_ONLY \\
+\midrule
+$H_{234}$ (Shannon, normalized) & $0.963 \pm 0.002$ & $\mathbf{0.960 \pm 0.001}$ \\
+top1\_prob                      & $0.995 \pm 0.005$ & $\mathbf{0.997 \pm 0.004}$ \\
+top5\_mass                      & $0.045 \pm 0.002$ & $\mathbf{0.047 \pm 0.002}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Counter-intuitively, Perch is \emph{more} confident on UNK rows --
+lower entropy, higher top-1 probability, more mass concentrated in the
+top-5 species. The latent recognizes the input is unfamiliar
+(reduced L2), but the output head suppresses this and confidently picks
+some mapped species that is acoustically nearest to the unknown vocalization.
+
+This is consistent with Perch's training objective: its 14,795-class head
+was trained to assign mass to one of those classes, with no
+``out-of-distribution'' option. The model lacks the language to express
+``I don't know'', so it commits to a confident wrong answer. The latent
+representation, which is upstream of the species head and trained
+end-to-end, retains a measurable trace of the unfamiliarity.
+
+\subsection{Finding 3: site confound dominates the centroid-distance signal}
+
+The cross-site UNK-detection AUC of $0.976$ for embedding-distance ratio
+is misleading. Site distribution of UNK\_ONLY vs KNOWN\_ONLY rows:
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Site & UNK\_ONLY count & KNOWN\_ONLY count \\
+\midrule
+S22  & 0   & 344 \\
+S08  & 43  & 0   \\
+S09  & 14  & 4   \\
+S13  & 6   & 12  \\
+S18  & 8   & 4   \\
+S19  & 2   & 12  \\
+others & 3 & 10  \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+S22 (344 KNOWN, 0 UNK) and S08 (43 UNK, 0 KNOWN) account for $> 80\%$ of
+the comparison. The "OOD detection" AUC is largely "site classification".
+
+\subsection{Finding 4: within-site detection is direction-inconsistent}
+
+Restricting to sites that have both classes ($n \geq 3$ each) -- S09,
+S13, S18 -- the combined uncertainty score's within-site UNK-vs-KNOWN AUC:
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Site & $n_{\mathrm{UNK}}$ & $n_{\mathrm{KNOWN}}$ & $U_\mathrm{combined}$ AUC \\
+\midrule
+S09 & 14 & 4  & $\mathbf{0.339}$ (\textbf{reversed}) \\
+S13 & 6  & 12 & $1.000$ \\
+S18 & 8  & 4  & $0.969$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+S13 and S18 show the expected direction (UNK rows have lower $\|\mathrm{emb}\|$,
+higher top1\_prob), but at S09 the direction reverses: UNK rows look
+\emph{less uncertain} than KNOWN rows. Mechanistic guess: at S09 (nocturnal
+Insecta-heavy site), UNK\_ONLY rows have a single dominant Insecta call
+that Perch confidently maps to a generic bird species, while KNOWN\_ONLY
+rows happen to contain rare Aves species the model is uncertain about.
+
+A naive routing variable derived from $U_\mathrm{combined}$ flips on a
+per-site basis -- not a universal signal.
+
+\subsection{Finding 5: routing on uncertainty regresses}
+
+Tested four routing schemes on 122 eval rows: hard threshold ($U > 0.5,
+1.0, 1.5$), sigmoid-gated continuous re-weighting (scale 0.5--3.0), and
+target-routing to exp84b (external-fine-tuned SED). Every variant
+regressed:
+
+\begin{center}
+\begin{tabular}{lcccccc}
+\toprule
+Config                      & macro $\Delta$ & sp\_row & Aves $\Delta$ & Insecta $\Delta$ & Mammalia $\Delta$ & Reptilia $\Delta$ \\
+\midrule
+v33 ref                     & 0      & 1.000 & 0     & 0      & 0     & 0 \\
+Hard $U > 1.5$, n=67       & $-0.029$ & 0.999 & $+0.003$ & $-0.072$ & $+0.008$ & $-0.136$ \\
+$\sigma$-route scale=1.0    & $-0.052$ & 0.999 & $+0.015$ & $-0.112$ & $-0.036$ & $-0.330$ \\
+$\sigma$-route → exp84b s=2 & $-0.065$ & 0.999 & $+0.022$ & $-0.147$ & $-0.059$ & $-0.324$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Mechanism of failure.}
+The diagnostic is correct (Perch latent shows reduced magnitude on UNK rows)
+but there is no \emph{trustworthy alternative model} to route uncertain rows
+to. Every SED we have (exp50, exp59, exp73, exp84b, exp83) was trained on
+the same 4-Insecta-site labeled SS data. Routing uncertain rows to any of
+them amplifies the same site shortcut that hurt v18, v19, v22, v28, v34, v36.
+The diagnostic is real but the treatment is not available within our
+current model zoo.
+
+\subsection{What this changes for the search}
+
+The framework predicts a fourth source of site-invariance is needed; this
+section quantifies the missing component as an "invariant non-Aves
+predictor". Until such a predictor exists, MoE-style routing on Perch
+uncertainty is structurally blocked.
+
+A subtle further hypothesis to test: even though absolute uncertainty
+direction reverses across sites (S09 vs S13/S18), the \emph{deviation
+from per-site mean confidence} may be consistently signed -- i.e., UNK
+rows may always be in the upper tail of within-site confidence, even
+when absolute confidence varies by site. exp91 will run this normalised
+comparison; if signal persists, the routing variable is per-site
+z-scored confidence, not raw confidence.
+
+
+\subsection{exp91: within-site z-scoring partially recovers the signal}
+
+User hypothesis after seeing exp89: even though absolute confidence
+direction reverses across sites (S09 reverse), the per-site z-scored
+deviation may be consistently signed -- UNK rows in the upper tail of
+each site's confidence distribution.
+
+Tested by per-site z-scoring 8 metrics (entropy, top1, top5\_mass,
+top1−top2 margin, embedding L2, max, var, participation ratio) on the
+739 labeled rows.
+
+\paragraph{Population-level signal exists but is small.}
+$U_\mathrm{combined}$ (combined per-site z-scored uncertainty)
+class means:
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Class      & $U_\mathrm{combined}$ mean \\
+\midrule
+UNK\_ONLY   & $+0.181$ \\
+UNK\_MIXED  & $+0.029$ \\
+KNOWN\_ONLY & $-0.056$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Clean monotonic ordering UNK\_ONLY $>$ UNK\_MIXED $>$ KNOWN\_ONLY:
+overconfidence-on-UNK is a systematic signal at population level. The
+direction inconsistency at S09 is a small-sample (n=4 KNOWN) artifact
+within an underlying population-level effect.
+
+Pooled (within qualifying sites) UNK\_ONLY-vs-KNOWN\_ONLY z-scored AUCs:
+\begin{itemize}
+  \item $\mathrm{emb}\_\mathrm{max}$: AUC $0.275$ (strength $0.45$, inverse direction)
+  \item $\mathrm{emb}\_\mathrm{var}$: AUC $0.334$ (strength $0.33$, inverse)
+  \item $\mathrm{emb}_2$: AUC $0.332$ (strength $0.34$, inverse)
+  \item participation ratio: AUC $0.612$ (strength $0.22$)
+  \item top1: AUC $0.595$ (strength $0.19$)
+\end{itemize}
+
+\paragraph{Routing tests.}
+With per-site z-scored uncertainty $U_z$ as the routing variable:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Variant                                  & macro $\Delta$ & sp\_row & Aves $\Delta$ & predicted LB \\
+\midrule
+v33 ref                                  & 0       & 1.000  & 0       & ref \\
+\textbf{C-suppress(map) $U_z > 1.0$ scale=0.3} & $\mathbf{+0.00070}$ & $\mathbf{0.99992}$ & $\mathbf{+0.0019}$ & A \\
+C-suppress scale=0.2                     & $+0.00056$ & 0.99995 & $+0.0015$ & A \\
+C-suppress scale=0.1                     & $+0.00040$ & 0.99999 & $+0.0016$ & A \\
+A-damp(global) scale=0.05                & $-0.029$ & 1.000 & $+0.005$ & C \\
+B-route-to-exp50 $U_z > 0.5$ (n=123)     & $-0.050$ & 0.981 & $-0.046$ & C \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{First class-A positive candidate since v33.}
+``C-suppress'' soft-suppresses mapped-species columns on uncertain rows
+($U_z > 1.0$): $\mathrm{prob}[i, c] \mathrel{*}= (1 - \mathrm{scale})$
+for $c \in \mathrm{mapped\_idx}$. Mechanism: it counters Perch's
+``overconfident-wrong on UNK'' specifically by dampening only the
+mapped-species channels that Perch is overconfident about, leaving the
+other 36 unmapped channels and the underlying file-max coherence
+intact.
+
+The local effect is small ($\sim 1/5$ of v33's local gain). LB-transfer
+estimate using v33's gain ratio: $+0.0002$ to $+0.0003$, near noise floor.
+
+\paragraph{Variant A and B failure modes.}
+A-damp regresses by $-0.029$ macro because flat damping reduces
+ranking signal globally on uncertain rows. B-route to exp50 regresses
+by $-0.05$ because routing UNK rows to a SED with site-conflated
+labels amplifies the same site shortcut documented in v22, v28, v34.
+
+\subsection{What this leaves open}
+
+Two directions remain unexplored:
+\begin{itemize}
+  \item \textbf{Larger-scale C-suppress sweep.} Whether $U_z$ threshold
+    or scale near $1.0$ produces measurable improvement without
+    breaking sp\_row.
+  \item \textbf{Spectral (FFT) features of mel-spectrogram time axis.}
+    The pooled mel cache is $T = 16$ frames; FFT along time provides
+    $\sim 8$ frequency bins describing temporal modulation patterns.
+    Insecta sonotypes are sustained narrow-band; bird calls are
+    transient broadband. Different temporal modulation signatures may
+    enable UNK detection independent of site.
+\end{itemize}
+
+
+\section{exp95--96: per-(row, class) selective lever from teacher-vote signals (2026-04-27)}
+
+After exp89--94 confirmed that Perch's latent has TN-vs-FN separability
+(but SED50's does not, and ConvNeXt-tiny's does), exp95 ran an exhaustive
+signal hunt over 16 candidate features for distinguishing the four
+TP/FP/TN/FN quadrants on (row, class) pairs.
+
+\subsection{exp95: signal ranking}
+
+Per-feature AUC for separating each pair, computed over 215 TP / 638 FP
+/ 10061 TN / 171 FN pairs across 15 mapped Aves classes:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Feature                               & TP\_vs\_FP & \textbf{TN\_vs\_FN} & CORR\_vs\_WRONG \\
+\midrule
+\textbf{sed\_on\_c (exp50 raw on class)}     & 0.053 & \textbf{0.983} & 0.632 \\
+\textbf{cnxt\_on\_c (exp59 raw on class)}    & 0.050 & \textbf{0.982} & 0.676 \\
+v33\_on\_c (self-prediction)                  & 0.244 & 0.925 & 0.968 \\
+\textbf{perch\_sed\_disagreement}             & \textbf{0.890} & 0.624 & 0.850 \\
+perch\_on\_c                                  & 0.666 & 0.255 & 0.786 \\
+file\_max\_perch\_c                           & 0.558 & 0.268 & 0.758 \\
+perch top1                                    & 0.437 & 0.740 & 0.612 \\
+Perch spatial-FFT ac\_dc\_ratio               & 0.541 & 0.685 & 0.682 \\
+Perch spatial-FFT low\_high\_ratio            & 0.506 & 0.699 & 0.648 \\
+ConvNeXt pre-head FFT ac\_dc\_ratio           & 0.522 & 0.673 & 0.658 \\
+SED50 pre-head FFT ac\_dc\_ratio              & 0.542 & 0.354 & 0.453 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Two near-perfect signals.}
+\begin{itemize}
+  \item \texttt{sed\_on\_c} (exp50's raw prediction on class $c$ at row
+    $i$): TN\_vs\_FN AUC $= 0.983$. When v33 says low on class $c$ but
+    exp50 says high, the truth is almost certainly that $c$ is positive
+    (FN, not TN). Mean $\mathrm{exp50}_\mathrm{TN} = 0.005$ vs
+    $\mathrm{exp50}_\mathrm{FN} = 0.65$ — 130$\times$ separation.
+  \item \texttt{perch\_sed\_disagreement} ($|\mathrm{Perch}[i,c] -
+    \mathrm{exp50}[i,c]|$): TP\_vs\_FP AUC $= 0.890$. When v33 says high
+    and the two teachers disagree, the prediction is likely FP.
+    Mean disagreement $\mathrm{TP} = 0.36$ vs $\mathrm{FP} = 0.82$.
+\end{itemize}
+
+\paragraph{The transformer-vs-CNN hypothesis is partially refuted.}
+ConvNeXt-tiny (pure CNN, ImageNet-22k pretrained) shows nearly identical
+latent FN signature as Perch (ac\_dc\_ratio TN\_vs\_FN AUC 0.673 vs
+Perch's 0.685). SED50 (pure CNN, HGNet-B0, 4.9M params, BatchNorm) is
+the outlier with flat AUC ($\sim 0.35$). The distinguishing factor is
+not transformer-vs-CNN but rather \emph{rich pretraining + modern
+normalization (LayerNorm) + sufficient depth}.
+
+\subsection{exp96: per-(row, class) selective lever}
+
+Two surgical operations on v33, both per-(row, class) — neither modifies
+$W_\mathrm{Perch}$ globally (preserving the v36 invariant):
+
+\paragraph{FN\_RESCUE.} Where $\mathrm{v33}[i, c] < \tau_\mathrm{low}$
+AND $\max(\mathrm{exp50}, \mathrm{exp59})[i, c] > \delta_t$:
+\[
+\mathrm{new}[i, c] = \mathrm{v33}[i, c] + \alpha_\mathrm{fn} \cdot
+\mathrm{teacher}[i, c] \cdot (1 - \mathrm{v33}[i, c])
+\]
+
+\paragraph{FP\_SUPPRESS.} Where $\mathrm{v33}[i, c] > \tau_\mathrm{high}$
+AND $|\mathrm{Perch}[i, c] - \mathrm{exp50}[i, c]| > \delta_d$:
+\[
+\mathrm{new}[i, c] = \mathrm{v33}[i, c] \cdot (1 - \alpha_\mathrm{fp}
+\cdot \mathrm{disagree}_{\mathrm{normalized}})
+\]
+
+\paragraph{Sweep results on 122 eval rows.}
+\begin{center}
+\begin{tabular}{lcccccc}
+\toprule
+Config                                    & macro $\Delta$ & sp\_row & Aves $\Delta$ & Insecta $\Delta$ & Mammal $\Delta$ & Amphibia $\Delta$ \\
+\midrule
+v33 ref                                   & 0       & 1.000 & 0       & 0       & 0       & 0 \\
+\textbf{FN\_R $\tau_l = 0.4$, $\alpha = 0.5$, $\delta = 0.3$} & $\mathbf{+0.0068}$ & $\mathbf{0.999}$ & $\mathbf{+0.009}$ & $\mathbf{+0.008}$ & $+0.004$ & $+0.005$ \\
+FN\_R $\tau_l = 0.5$, $\alpha = 0.5$       & $+0.0065$ & 0.999 & $+0.009$ & $+0.008$ & $+0.004$ & $+0.005$ \\
+FN+FP $\tau_l = 0.4, \alpha_\mathrm{fn} = 0.3, \tau_h = 0.5, \alpha_\mathrm{fp} = 0.2$ & $+0.0065$ & 0.999 & $+0.007$ & $+0.006$ & $+0.004$ & $+0.007$ \\
+FN\_R(exp50 only) $\tau_l = 0.5$, $\alpha = 0.3$ & $+0.0033$ & 1.000 & $0$    & $+0.006$ & $+0.004$ & $+0.003$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Comparison with prior submissions.}
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+                  & macro\_d local & sp\_row & Aves $\Delta$ & $W_\mathrm{Perch}$ & LB outcome \\
+\midrule
+v33 (positive)    & $+0.003$       & 0.994   & $+0.007$ & 0.7 & $+0.001$ \\
+v34 (negative)    & $+0.026$       & 0.990   & $+0.008$ & 0.7 (+ mel-iVAE) & $-0.016$ \\
+v36 (negative)    & $+0.013$       & 0.999   & $+0.024$ & \textbf{0.5 (violated)} & $-0.017$ \\
+\textbf{Best exp96 (untested)} & \textbf{+0.007} & \textbf{0.999} & \textbf{+0.009} & \textbf{0.7 (preserved)} & ? \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The candidate's profile most closely matches v33's (the only LB-positive
+modification): roughly twice the local macro gain, identical sp\_row
+safety margin, comparable Aves $\Delta$. Crucially preserves
+$W_\mathrm{Perch} \geq 0.7$ globally.
+
+\paragraph{Why this candidate is structurally different from v34/v36.}
+\begin{itemize}
+  \item v34: introduced mel-iVAE as a new universal lever applied to all
+    234 columns globally. Inherits site shortcut from train-SS-fitted
+    centroids.
+  \item v36: rebalanced the entire blend (4 SEDs at 0.125 each,
+    $W_\mathrm{Perch} = 0.5$). Amplified site shortcut by overweighting
+    site-conflated SEDs.
+  \item exp96 best: surgical per-(row, class) modification only where
+    multiple teacher signals provide additional information. Surface
+    area is small (only rows where v33 is uncertain on $c$ and exp50/exp59
+    have positive signal). $W_\mathrm{Perch}$ stays at 0.7. Local profile
+    twice v33's gain with same safety margin.
+\end{itemize}
+
+\paragraph{Residual transfer risk.}
+The mechanism uses \texttt{sed\_on\_c} as an FN signal. exp50 and exp59
+are both train-SS-trained and inherit the 4-Insecta-site shortcut.
+Therefore on hidden test sites, an "exp50 says high but v33 says low"
+event may reflect site fingerprint rather than missed species. The
+surgical surface area limits this risk but does not eliminate it.
+
+The framework predicts class-A transfer (v33-like profile, preserved
+$W_\mathrm{Perch}$, universal mechanism, all-taxa $\geq 0$ Aves $> 0$),
+but the $-0.017$ catastrophe of v36 with similar formal class-A profile
+is a warning. LB testing is the only definitive validation.
+
+
+\subsection{exp97: robustness checks on the best lever}
+
+Five strain tests on the FN\_RESCUE (best from exp96):
+
+\paragraph{R1. Train-vs-eval consistency.} The lever produces $\Delta$
+macro $= +0.0068$ on 122 eval rows (40 evaluable classes) but only
+$+0.0007$ on 617 train rows (66 classes, mostly saturated at AUC
+$\sim 0.98$). Train/eval gain ratio = $0.11$ — the lever is not fitting
+to train-distribution patterns. Low ratio is consistent with the gain
+coming from rare-class rescue rather than general-class tuning.
+
+\paragraph{R2. Per-site analysis.} Eval $\Delta$ macro by site:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Site (eval) & n\_rows & v33 & lever & $\Delta$ \\
+\midrule
+S08 (Insecta-dominant) & 12 & 0.619 & 0.596 & $\mathbf{-0.023}$ \\
+S13                    & 12 & 0.972 & 0.972 & 0.000 \\
+S19                    & 12 & 0.535 & 0.535 & 0.000 \\
+S22 (Aves-dominant)    & 60 & 0.849 & 0.854 & $+0.005$ \\
+S23                    & 24 & 0.556 & 0.594 & $\mathbf{+0.039}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The +0.0068 net gain comes mostly from S23 ($+0.039$, 24 rows). S08
+($-0.023$, 12 rows) and S22 ($+0.005$, 60 rows) push back. S13/S19 stay
+flat. The S08 regression is a warning: the lever boosts mapped-Aves
+predictions on rows that have only unmapped Insecta GT, which can hurt
+some Aves classes' AUC by adding incorrect-positive rankings.
+
+\paragraph{R3. Per-class attribution.} Top contributors to eval gain:
+22967 Amphibia ($+0.091$), wfwduc1 Aves ($+0.074$), 22973 Amphibia
+($+0.054$), 47158son11 Insecta ($+0.042$). Top regressors: 555146
+Amphibia ($-0.043$, already saturated at v33 = 0.985), 517063 Amphibia
+($-0.025$, already at 0.993). The lever helps weak classes but slightly
+hurts saturated ones — net positive but with cost.
+
+\paragraph{R4. Holdout-site sensitivity.} Drop one site at a time, recompute:
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Holdout & $\Delta$ macro on remaining \\
+\midrule
+S08 & $+0.007$ \\
+S09 & $+0.007$ \\
+S13 & $+0.008$ \\
+S19 & $+0.005$ \\
+S22 & $+0.013$ \\
+S23 & $+0.004$ (smallest — confirms S23 leads contribution) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+All holdouts retain positive net gain. Lever is not a single-site
+phenomenon. With S22 held out the gain grows to $+0.013$, indicating
+S22's "common Aves" rows actually mute the gain compared to rare-class
+sites.
+
+\paragraph{R5. Finer parameter sweep.} A wider sweep around the
+exp96 best identified an even better config: $\tau_l = 0.55$,
+$\alpha = 0.7$, $\delta = 0.2$ — macro $\Delta = +0.010$, sp\_row 0.997,
+Aves $\Delta = +0.017$, all five taxa $\geq 0$.
+
+\begin{center}
+\begin{tabular}{lcccccc}
+\toprule
+                                       & macro $\Delta$ & sp\_row & Aves $\Delta$ & W\_Perch & ratio (Aves $\Delta$ / v33) & predicted \\
+\midrule
+v33 (LB +0.001 reference)              & $+0.003$ & 0.994   & $+0.007$ & 0.7 & 1.0 & ref \\
+v34 (LB $-0.016$)                       & $+0.026$ & 0.990   & $+0.008$ & 0.7 (+ mel-iVAE) & 1.1 & X \\
+v36 (LB $-0.017$)                       & $+0.013$ & 0.999   & $+0.024$ & \textbf{0.5} & 3.4 & X \\
+\textbf{exp97 best (untested)}        & $+0.010$ & 0.997   & $+0.017$ & 0.7 (preserved) & 2.4 & ? \\
+exp96 best ($\tau_l=0.4, \alpha=0.5, \delta=0.3$) & $+0.007$ & 0.999 & $+0.009$ & 0.7 & 1.3 & ? \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The exp97 best lies between v33 and v36 in Aves $\Delta$ magnitude
+($\times 2.4$ v33's). The exp96 best is closer to v33 ($\times 1.3$).
+Both preserve $W_\mathrm{Perch}$. Neither has been LB-tested.
+
+\subsection{Decision space}
+
+\paragraph{Bull case.}
+\begin{itemize}
+  \item Mechanism is genuinely new (per-(row, class) teacher-vote rescue).
+  \item Holdout-site robust: not driven by any single site.
+  \item Train/eval ratio 0.11 — not train-distribution-fitted.
+  \item W\_Perch preserved at 0.7.
+  \item v33 transferred at $+0.001$ with similar profile, this is twice
+    the local magnitude.
+  \item Best-case LB transfer: $+0.002$ to $+0.004$.
+\end{itemize}
+
+\paragraph{Bear case.}
+\begin{itemize}
+  \item S08 regresses by $-0.023$. The Insecta-only site is exactly where
+    Perch's overconfident-wrong pattern is strongest, and the lever
+    sometimes amplifies that pattern.
+  \item exp50 and exp59 (the teachers we trust) both inherit the 4-Insecta-
+    site shortcut. Their per-class predictions on hidden test sites may
+    be site-fingerprint signals rather than species signals.
+  \item v36 had a similar formal profile (sp\_row 0.999, all taxa $\geq 0$,
+    Aves $+0.024$) and regressed by $-0.017$. The structural similarity
+    is concerning.
+  \item Worst-case LB transfer: $-0.005$ to $-0.015$.
+\end{itemize}
+
+\paragraph{Decision.}
+With 4 LB slots remaining today and high uncertainty, the candidate is
+recorded but not yet submitted. The two-sided risk distribution is
+honest acknowledgment that local metrics have repeatedly failed to
+predict LB transfer for this lever family.
+
+
+\section{exp99--100: LR-based correction lever — strongest cross-site validation yet}
+
+After exp93--98 identified per-class teacher signals (\texttt{sed\_on\_c},
+\texttt{cnxt\_on\_c}, \texttt{perch\_sed\_disagree}) with near-perfect
+TP/FP/TN/FN separability, exp99 fitted multivariate logistic regression
+detectors and exp100 deployed them as a per-(row, class) correction lever.
+
+\subsection{exp99: LR FP/FN detectors}
+
+For each (row, class) pair where v33 fires above 0.5 (FP territory) or
+below 0.5 (FN territory), built features:
+\begin{itemize}
+  \item Universal: \texttt{perch\_on\_c}, \texttt{exp50\_on\_c},
+    \texttt{exp59\_on\_c}, \texttt{perch\_sed\_disagree},
+    \texttt{file\_mean\_e50\_c}, \texttt{file\_std\_e50\_c},
+    \texttt{file\_uniform\_e50\_c}, \texttt{v33\_on\_c}
+  \item Site-specific: \texttt{class\_dom\_site\_match},
+    \texttt{class\_site\_concentration}, \texttt{hour\_match\_strength}
+\end{itemize}
+
+Trained LR on TRAIN pairs (673 FP, 8582 FN), evaluated on EVAL pairs
+(180 FP, 1650 FN):
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Detector & Features & Train AUC & Eval AUC \\
+\midrule
+FP & FULL (incl. site)         & 0.979 & 0.949 \\
+FP & \textbf{UNIVERSAL only}   & 0.980 & \textbf{0.909} \\
+FN & FULL                       & 0.998 & 0.912 \\
+FN & \textbf{UNIVERSAL only}   & 0.998 & \textbf{0.987} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Universal-only features retain almost all signal. Site-specific features
+add little (and FN detector improves with universal-only — site features
+were overfitting).
+
+\paragraph{Key driver: file-level uniformity.} The strongest "↑FP"
+coefficient is \texttt{file\_uniform\_e50\_c} (+0.56): when exp50 fires
+uniformly across all 12 windows of a file, that's a site fingerprint
+(species calls are sparse and bursty); when it fires on just a few
+windows, that's a real species detection.
+
+\subsection{exp100: LOSO-site cross-validation — decisive evidence of generalization}
+
+The strongest test we have ever conducted of cross-site generalization.
+Train LR on labeled-SS sites except one, evaluate on the held-out site:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Holdout site & $n$ pairs & FP detector AUC & FN detector AUC \\
+\midrule
+S08 & 55 / 845    & 1.000  & 0.999 \\
+S09 & 22          & 0.950  & --    \\
+S15 & 143 / 577   & 0.966  & 0.986 \\
+S19 & --          & --     & 0.998 \\
+S22 & 525 / 6630  & 0.952  & 0.996 \\
+S23 & 91 / 449    & 0.999  & 0.929 \\
+\midrule
+Mean LOSO         &        & \textbf{0.973} & \textbf{0.981} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This is the strongest cross-site evidence we have collected. Across all
+5 (FP) / 5 (FN) holdout configurations, the detectors retain AUC $\geq
+0.93$. The LR is genuinely using site-invariant signals (file uniformity,
+model agreement, file mean) -- not memorizing site-class associations.
+
+\subsection{Application to v33}
+
+Sweep $\alpha_\mathrm{fn}$ (FN boost) $\times$ $\beta_\mathrm{fp}$ (FP suppress)
+on 122 eval rows:
+
+\begin{center}
+\begin{tabular}{lcccccccc}
+\toprule
+Config & macro $\Delta$ & sp\_row & Aves $\Delta$ & Insecta & Mamm & Amph & Rept & predicted \\
+\midrule
+v33 ref & 0     & 1.000  & 0       & 0 & 0 & 0 & 0 & ref \\
+\textbf{LR $\alpha=0.5$ $\beta=0.1$} & $\mathbf{+0.005}$ & $\mathbf{0.999}$ & $\mathbf{+0.022}$ & 0 & 0 & 0 & 0 & A \\
+LR $\alpha=0.5$ $\beta=0.0$           & $+0.005$ & 0.999  & $+0.022$ & 0 & 0 & 0 & 0 & A \\
+LR $\alpha=0.3$ $\beta=0.1$           & $+0.0035$ & 0.9996 & $+0.016$ & 0 & 0 & 0 & 0 & A \\
+LR $\alpha=0.2$ $\beta=0.0$           & $+0.0024$ & 0.9999 & $+0.011$ & 0 & 0 & 0 & 0 & A \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Best: $\alpha = 0.5$, $\beta = 0.1$. Aves $\Delta = +0.022$ is the entire
+gain (other taxa $= 0$). Per-site analysis shows S08 $\Delta = 0$
+(no spurious modification), S23 $\Delta = +0.028$ (the gain
+concentrates on the rare-Aves-rich site).
+
+\subsection{Honest LB-transfer assessment}
+
+\paragraph{Bull-case factors.}
+\begin{itemize}
+  \item LOSO-site mean AUC $= 0.973$/$0.981$ — strongest cross-site
+    evidence we have ever obtained.
+  \item Universal-only features retain signal ($> 0.91$ AUC); site-
+    identity-dependent features are not needed.
+  \item $W_\mathrm{Perch} = 0.7$ globally preserved (per-class
+    adjustment).
+  \item exp97's S08 regression $-0.023$ becomes 0 here (per-site
+    analysis confirms).
+  \item macro $\Delta = +0.005$ is half of exp97's best and a third of
+    v36's. If transfer ratio holds, predicted LB $\sim +0.001$.
+\end{itemize}
+
+\paragraph{Bear-case factors.}
+\begin{itemize}
+  \item Aves $\Delta = +0.022$ is structurally similar to v36's $+0.024$
+    that crashed at LB $-0.017$. Past patterns of high Aves $\Delta$
+    transferring to negative LB are an active warning.
+  \item LR was fitted on labeled SS pairs. Even with universal features,
+    the LR coefficients reflect SS distribution. Hidden-test feature
+    distribution may shift.
+  \item Insecta/Mammalia/Amphibia/Reptilia $\Delta = 0$ — all gain
+    is on Aves, the same taxon where v36 also lifted.
+  \item Two consecutive predictions of "class A LB-positive" (v34, v36)
+    have failed.
+\end{itemize}
+
+\paragraph{Verdict.} This is the strongest LB candidate we have produced
+since v33 became production. The LOSO-site cross-validation is qualitative
+evidence the previous candidates lacked. The mechanism is genuinely
+different from v36 (per-class targeted using LR-fitted signals, vs
+uniform global SED rebalancing). If LB framework predictions are correct,
+$+0.001$ to $+0.003$. If the past anti-correlation pattern continues,
+$-0.005$ to $-0.010$. Worth one of the four remaining slots, but with
+clear-eyed acknowledgment of uncertainty.
+
+
+\section{Final LB sweep (2026-04-27): all 5 slots regressed, framework refuted}
+
+After the LR-correction lever achieved LOSO-site CV AUC 0.97 (the
+strongest cross-site validation we had ever produced), we used all 5
+daily LB submission slots to test orthogonal hypotheses about which
+component of the lever family transfers.
+
+\paragraph{Submissions.}
+\begin{center}
+\begin{tabular}{lllll}
+\toprule
+Sub & Config                                  & local macro $\Delta$ & local Aves $\Delta$ & LB \\
+\midrule
+v33 (production ref) & 0.7P + 0.3 exp50 + V9 + file-max $\alpha=0.10$ & ref & ref & 0.932 \\
+v38 & LR $\alpha_\mathrm{fn}=0.3, \beta_\mathrm{fp}=0.1$ (conservative) & $+0.0035$ & $+0.016$ & $0.920$ \\
+v39 & LR $\alpha=0.5, \beta=0.1$ (aggressive)                            & $+0.005$  & $+0.022$ & $0.915$ \\
+v40 & LR $\alpha=0.5, \beta=0.0$ (FN-only ablation)                       & $+0.005$  & $+0.022$ & $0.917$ \\
+v41 & exp97 threshold rule (no LR)                                       & $+0.010$  & $+0.017$ & $0.918$ \\
+v42 & file-max $\alpha=0.20$ (universal physics scaled)                  & $+0.006$  & $+0.014$ & $0.918$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Results: all 5 regressed.}
+LB outcomes range $-0.012$ to $-0.017$. The LR-correction lever
+(v38--v40), the simpler threshold-rule equivalent (v41), and even the
+universal-physics scaling (v42) all crashed by similar magnitude.
+
+\paragraph{LOSO-site CV invalidated.} The strongest cross-site
+validation we ever produced (LR detector LOSO-site mean AUC $0.973$
+for FP, $0.981$ for FN) failed to predict LB transfer. This is the
+clearest possible refutation of our extended anti-correlation rule:
+\emph{cross-site validation on labeled SS holdouts is fundamentally
+disconnected from hidden-test-site generalization}.
+
+\paragraph{LR vs threshold-rule: equivalent failures.}
+\begin{itemize}
+  \item v40 (LR FN-only): LB $-0.015$
+  \item v41 (exp97 threshold rule, no LR): LB $-0.014$
+\end{itemize}
+The LR-fitting added no measurable value beyond a simple threshold rule
+applied to raw teacher scores. The problem is the FAMILY (per-(row,
+class) teacher-boost on low v33), not the calibration method.
+
+\paragraph{FP-suppress component is dead weight.}
+\begin{itemize}
+  \item v39 (LR with $\beta=0.1$ FP-suppress): LB $-0.017$
+  \item v40 (LR same $\alpha$ but $\beta=0$): LB $-0.015$
+\end{itemize}
+Adding FP-suppress costs an extra $-0.002$. Local TP/FP separability
+AUC $0.89$ does not translate to LB benefit; in fact it actively hurts.
+
+\paragraph{Universal physics also non-monotonic.}
+v33 uses file-max $\alpha = 0.10$ and was LB $+0.001$. v42 with
+$\alpha = 0.20$ crashed to LB $-0.014$. \textbf{file-max coherence has
+a sharp peak at $\alpha = 0.10$ and degrades rapidly above it.} Even
+the most defensible "universal physics" lever has a narrow viable range.
+
+\subsection{Updated lever taxonomy after final sweep}
+
+11 distinct LB-tested mechanisms, sorted by LB $\Delta$:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Mechanism                                           & LB $\Delta$ vs ref \\
+\midrule
+\textbf{Universal physics @ optimal $\alpha$} (v33 file-max 0.10) & $\mathbf{+0.001}$ \\
+R5 routing (v32, model-property based)              & $-0.001$ \\
+27-head additive (v28)                              & $-0.002$ \\
+Per-class OOF routing (v29)                         & $-0.004$ \\
+SED swap to Perch-pseudo SED (v17 SED41f)           & $-0.007$ \\
+LR conservative (v38)                               & $-0.012$ \\
+\textbf{Universal physics scaled} (v42 $\alpha=0.20$) & $-0.014$ \\
+Threshold rule (v41)                                & $-0.014$ \\
+LR FN-only (v40)                                    & $-0.015$ \\
+Train-SS centroid (v34 mel-iVAE)                    & $-0.016$ \\
+Train-SS lookup (v22 site prior + cluster)          & $-0.016$ \\
+LR aggressive (v39)                                 & $-0.017$ \\
+Global rebalance W\_Perch=0.5 (v36)                  & $-0.017$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Across 11 mechanisms, only v33's exact configuration is
+LB-positive.} Every variation -- whether per-class fitted, threshold
+rule, universal physics scaled, train-SS lookup, global rebalance, or
+SED swap -- regresses by $-0.012$ to $-0.017$ from v33's 0.932. The
+implication is that v33 is not just a local optimum but a true ceiling
+for our current model zoo.
+
+\paragraph{Falsifiable predictions all failed.} Our framework predicted
+"class A" for v34, v36, v38, v39, v40, v41 -- six consecutive
+predictions. All six regressed. The framework as currently formulated
+is not predictive of LB transfer.
+
+\subsection{What this leaves}
+
+Three remaining options:
+\begin{enumerate}
+  \item \textbf{Data augmentation}: add training-time site-invariance
+    via multi-region BG mixing (2023 + 2024 + 2025 SS pools), expanded
+    xeno-canto / iNat downloads (especially Mammalia and Reptilia where
+    we have nothing). This adds a NEW source of site-invariance
+    \emph{at training time}, not at inference.
+  \item \textbf{New foundation model}: Perch v3 or a transformer-based
+    bioacoustic teacher with rich multi-region pretraining. Would
+    occupy the $W \geq 0.7$ slot currently held by Perch v2, with
+    stronger species-discriminability geometry.
+  \item \textbf{Accept v33 as production ceiling.} Twenty-one LB
+    submissions across two months have produced exactly one positive-
+    transfer modification (v33 file-max $\alpha=0.10$). The remaining
+    inference-time lever space is exhausted.
+\end{enumerate}
+
+The negative-result thesis is now complete: under our data structure
+(4-Insecta-site labeled SS, multi-task SED variants all on
+HGNet-B0-style architectures, single multi-region pretrained Perch
+backbone), the LB-transferable lever space at inference time consists
+solely of universal physical priors at narrow optimal hyperparameters.
+Further LB gains require enriching the training-time data distribution
+or replacing the foundation model.

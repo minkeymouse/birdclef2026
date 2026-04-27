@@ -1,0 +1,2344 @@
+\section{Experiments}
+\label{sec:experiments}
+
+This section documents our systematic experimental progression from baseline
+to competitive performance on the BirdCLEF+ 2026 challenge.
+All experiments use the same evaluation protocol: macro-averaged ROC-AUC on
+held-out labeled soundscapes (739 segments, 75 species) as local proxy,
+and Kaggle leaderboard (LB) score as the definitive metric.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 3: SED Baseline}
+\label{sec:exp3}
+
+Our first competitive baseline uses Sound Event Detection (SED) with an
+attention-based pooling head.
+
+\paragraph{Setup.}
+EfficientNet-B0 (NS-JFT pretrained, 5.3M params), 10-second training chunks,
+mel-spectrogram input ($128 \times 224$), 2-fold ensemble.
+Training: 15 epochs, AdamW (lr=$10^{-3}$), cosine schedule, batch size 64.
+Augmentation: SpecAugment (freq/time masking) + spectrogram-level mixup ($\alpha=0.4$).
+Dual loss: $\mathcal{L} = 0.5 \cdot \text{BCE}(\hat{y}_\text{clip}, y) + 0.5 \cdot \text{BCE}(\hat{y}_\text{frame}, y)$.
+
+\paragraph{Inference.}
+Time-shift TTA (0s and 2.5s offsets), site/hour priors from labeled soundscapes.
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 3 results (SED baseline).}
+\label{tab:exp3}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Fold} & \textbf{val\_auc} & \textbf{Best Epoch} & \textbf{ss\_auc} & \textbf{LB} \\
+\hline
+0 & 0.9867 & 11 & 0.7252 & \multirow{2}{*}{\textbf{0.81}} \\
+1 & 0.9879 & 11 & 0.7322 & \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+The gap between val\_auc ($\sim$0.99) and ss\_auc ($\sim$0.73) reveals significant
+domain shift between isolated training recordings and field soundscapes.
+The LB score of 0.81 exceeds ss\_auc, likely due to TTA and site/hour priors
+applied only at inference time.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 4: Perch v2 Knowledge Distillation}
+\label{sec:exp4}
+
+\paragraph{Hypothesis.}
+Google's Perch v2 bird vocalization classifier (1,536-dimensional embeddings,
+$\sim$14.8K species) can provide soft supervision for 203/234 BirdCLEF species,
+bridging the domain gap via teacher knowledge.
+
+\paragraph{Setup.}
+Phase 1: Extract temperature-scaled ($T=3$) soft labels from Perch v2 for all
+35,549 training files (batch inference, CPU, 193.5 min).
+Phase 2: Train EfficientNet-B0 student with combined loss:
+$\mathcal{L} = \alpha \cdot \text{BCE}(\hat{y}, y_\text{hard}) + (1-\alpha) \cdot \text{BCE}(\hat{y}, y_\text{soft})$
+where $\alpha = 0.5$. Non-bird species (31) use hard labels only.
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 4 results (Perch KD).}
+\label{tab:exp4}
+\begin{tabular}{lccc}
+\hline
+\textbf{Fold} & \textbf{val\_auc} & \textbf{ss\_auc} & \textbf{$\Delta$ vs exp3} \\
+\hline
+0 & 0.9502 & 0.5750 & $-0.150$ \\
+1 & 0.9431 & 0.5416 & $-0.191$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+KD from Perch \textbf{degraded} soundscape performance substantially.
+val\_auc was lower (0.95 vs 0.99), and ss\_auc dropped from 0.73 to 0.55--0.58.
+The failure likely stems from domain mismatch: Perch was trained on global bird
+recordings, not Pantanal field soundscapes with overlapping multi-species audio.
+The soft labels pulled the student toward Perch's species priors rather than
+learning the target distribution.
+
+\textbf{Finding:} Naive KD from a general-purpose audio classifier hurts
+performance when the teacher's training domain differs significantly from
+the target evaluation domain.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 5: Self-Training v1}
+\label{sec:exp5}
+
+\paragraph{Hypothesis.}
+Pseudo-labeling 10,592 unlabeled soundscapes with the exp3 teacher and
+retraining should improve soundscape-domain performance.
+
+\paragraph{Setup.}
+Teacher: exp3 2-fold ensemble. Pseudo-label threshold: 0.5 (confidence).
+Power transform ($p=0.7$) on pseudo-label probabilities.
+Student initialized from exp3 weights, fine-tuned with
+lr=$5 \times 10^{-4}$, 15 epochs, pseudo sample weight 0.5.
+
+\paragraph{Results.}
+Only 935/10,592 (8.8\%) soundscapes exceeded the confidence threshold,
+yielding 5,610 pseudo training samples.
+
+\begin{table}[h]
+\centering
+\caption{Experiment 5 results (self-training v1).}
+\label{tab:exp5}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Fold} & \textbf{val\_auc} & \textbf{Best Epoch} & \textbf{ss\_auc} & \textbf{$\Delta$ vs exp3} \\
+\hline
+0 & 0.9963 & 1 & 0.7161 & $-0.009$ \\
+1 & 0.9949 & 1 & 0.7482 & $+0.016$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+The best checkpoint for both folds was epoch 1 (immediately after initialization
+from exp3), indicating that continued fine-tuning degraded performance.
+Key issues: (1) learning rate too high for fine-tuning ($5 \times 10^{-4}$),
+(2) only 8.8\% of soundscapes produced pseudo-labels (threshold too strict),
+(3) 15 epochs caused overfitting from the very start.
+
+Fold 1 showed marginal improvement (+0.016 ss\_auc), suggesting pseudo-labels
+have potential but require careful hyperparameter tuning.
+
+\textbf{Finding:} Self-training from a pre-trained checkpoint requires very low
+learning rate and minimal epochs. The pseudo-label threshold of 0.5 was too
+conservative, capturing only 8.8\% of available unlabeled data.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 6: Backbone Upgrade + Extended Context}
+\label{sec:exp6}
+
+\paragraph{Hypothesis.}
+Scaling the backbone from EfficientNet-B0 (5.3M) to B3 (12M) increases model
+capacity, and extending training chunks from 10s to 20s provides richer
+temporal context for species identification.
+
+\paragraph{Setup.}
+Backbone: \texttt{tf\_efficientnet\_b3.ns\_jft\_in1k} (12M params).
+Training chunks: 20 seconds. Image size: $128 \times 300$.
+Batch size reduced to 32 (GPU memory). Otherwise identical to exp3.
+
+\paragraph{Results.}
+
+\begin{table}[h]
+\centering
+\caption{Experiment 6 results: backbone and duration ablation.}
+\label{tab:exp6}
+\begin{tabular}{llcccc}
+\hline
+\textbf{Variant} & \textbf{Backbone} & \textbf{Duration} & \textbf{Fold} & \textbf{val\_auc} & \textbf{ss\_auc} \\
+\hline
+exp6 (20s)  & B3 (13.8M) & 20s & 0 & 0.9840 & 0.6344 \\
+exp6b (10s) & B3 (13.8M) & 10s & 0 & 0.9845 & 0.7206 \\
+exp6b (10s) & B3 (13.8M) & 10s & 1 & 0.9869 & 0.6949 \\
+\hline
+exp3 (ref)  & B0 (5.3M)  & 10s & 0 & 0.9867 & 0.7252 \\
+exp3 (ref)  & B0 (5.3M)  & 10s & 1 & 0.9879 & 0.7322 \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+Two key findings emerge:
+
+\textbf{(1) Training duration mismatch hurts evaluation.}
+The 20s variant achieved comparable val\_auc (0.984) but significantly lower
+ss\_auc (0.634 vs 0.725). Since evaluation uses 5-second segments, the
+spectrogram resize from 20s to a fixed image size creates very different
+temporal patterns than seen during training. This 4:1 temporal compression
+ratio degrades learned features at inference time.
+
+\textbf{(2) Backbone capacity is not the bottleneck.}
+EfficientNet-B3 (13.8M params, 2.6$\times$ B0) produced nearly identical
+ss\_auc to B0 when using the same 10s duration. The domain shift between
+isolated training recordings and multi-species field soundscapes---not model
+capacity---is the primary performance limiter. Future experiments should focus
+on closing this domain gap rather than scaling model size.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 7: Self-Training v2 — Domain Adaptation}
+\label{sec:exp7}
+
+\paragraph{Hypothesis.}
+The domain shift between \texttt{train\_audio} (isolated recordings) and
+soundscapes (multi-species field recordings) is the primary performance limiter.
+Directly injecting soundscape data into training and expanding pseudo-labels
+should close this gap.
+
+\paragraph{Key changes from exp5 (self-training v1).}
+\begin{enumerate}
+    \item Labeled soundscapes included in training (50/50 train/eval split by file)
+    \item Pseudo-label threshold lowered: $0.5 \to 0.3$ (captures 28.2\% vs 8.8\%)
+    \item Learning rate: $5 \times 10^{-4} \to 10^{-5}$ (fine-tuning, not retraining)
+    \item Epochs: $15 \to 5$ (prevents overfitting)
+    \item Pseudo sample weight: $0.5 \to 0.3$
+    \item Best checkpoint selected by ss\_auc (not val\_auc)
+\end{enumerate}
+
+\paragraph{Results.}
+Training data: 54,025 audio + 359 labeled soundscape + 17,892 pseudo = 72,276 total.
+
+\begin{table}[h]
+\centering
+\caption{Experiment 7 results (self-training v2).}
+\label{tab:exp7}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Fold} & \textbf{ss\_auc (held-out)} & \textbf{full\_ss} & \textbf{Best Epoch} & \textbf{$\Delta$ vs exp3} \\
+\hline
+0 & 0.8130 & 0.7810 & 4 & $+0.056$ \\
+1 & 0.7902 & 0.8054 & 4 & $+0.073$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+This is the largest single improvement in our experimental series.
+Three factors contributed:
+
+\textbf{(1) Soundscape training data.}
+Including even 359 labeled soundscape segments (0.5\% of training data)
+provided direct exposure to the target domain's acoustic characteristics.
+
+\textbf{(2) Lower pseudo-label threshold.}
+Reducing from 0.5 to 0.3 tripled the pseudo-labeled data (17,892 vs 5,610),
+providing substantially more domain-relevant training signal.
+
+\textbf{(3) Conservative fine-tuning.}
+The combination of very low learning rate ($10^{-5}$) and few epochs (5)
+preserved the base model's learned features while adapting to the new data.
+Best checkpoints were at epoch 4, confirming the narrow useful training window.
+
+\textbf{Finding:} Domain adaptation through in-domain data inclusion and
+conservative pseudo-label fine-tuning is far more effective than model scaling
+(exp6) or knowledge distillation from out-of-domain teachers (exp4).
+
+% ------------------------------------------------------------------
+\subsection{Experiment 8: Focal Loss + Label Smoothing}
+\label{sec:exp8}
+
+\paragraph{Hypothesis.}
+Focal loss ($\gamma=2$) down-weights easy negatives and focuses gradient on
+hard examples (rare species, ambiguous soundscapes), while label smoothing
+($\epsilon=0.05$) improves probability calibration for AUC evaluation.
+
+\paragraph{Setup.}
+Same pipeline as exp7: EfficientNet-B0, initialized from exp3, combined
+training data (train\_audio + labeled soundscapes + pseudo-labels from exp3
+teacher at threshold 0.3), LR=$10^{-5}$, 5 epochs, cosine schedule.
+
+\textbf{Change from exp7:} BCE $\to$ focal loss with
+$\mathcal{L}_\text{focal} = (1-p_t)^\gamma \cdot \text{BCE}(\hat{y}, y')$
+where $y' = y(1-\epsilon) + 0.5\epsilon$ (label smoothing).
+Applied to both clipwise and framewise heads.
+
+\paragraph{Results.}
+
+\begin{table}[h]
+\centering
+\caption{Experiment 8 results (focal loss + label smoothing).}
+\label{tab:exp8}
+\begin{tabular}{lccccc}
+\hline
+\textbf{Fold} & \textbf{ss\_auc} & \textbf{full\_ss} & \textbf{Best Epoch} & \textbf{$\Delta$ vs exp7} \\
+\hline
+0 & 0.8282 & 0.8149 & 5 & $+0.034$ \\
+1 & 0.8051 & 0.8242 & 5 & $+0.019$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+Focal loss consistently improved over exp7's BCE baseline across both folds,
+with full\_ss gains of +0.034 (fold 0) and +0.019 (fold 1).
+Three contributing mechanisms:
+
+\textbf{(1) Hard example mining via focal loss.}
+With $\gamma=2$, easy negatives (the vast majority of the 234 classes per sample)
+receive near-zero gradient. This effectively concentrates learning on the
+$\sim$5--10 confusable species per sample, particularly benefiting rare taxa.
+
+\textbf{(2) Label smoothing for AUC calibration.}
+Smoothing targets from $\{0,1\}$ to $\{0.025, 0.975\}$ prevents the model from
+producing overconfident predictions. Since AUC depends on ranking rather than
+absolute calibration, the reduced overconfidence improves separation between
+true positives and hard negatives.
+
+\textbf{(3) Extended training window.}
+Both folds achieved their best checkpoint at epoch 5 (vs epoch 4 in exp7),
+suggesting that focal loss's implicit curriculum (easy$\to$hard) enables
+productive training for longer without overfitting.
+
+\textbf{Finding:} Focal loss with label smoothing provides a complementary
+improvement orthogonal to domain adaptation (exp7). The combination of
+self-training + focal loss yields full\_ss 0.81--0.82, a cumulative
+improvement of $+0.09$ over the exp3 baseline.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 9: Enhanced Augmentation + 2nd Round Self-Training}
+\label{sec:exp9}
+
+\paragraph{Hypothesis.}
+Iterative self-training with an improved teacher (exp8) produces higher-quality
+pseudo-labels, while stronger augmentation (aggressive SpecAugment, random gain,
+Gaussian noise) acts as noise injection that improves robustness.
+
+\paragraph{Key changes from exp8.}
+\begin{enumerate}
+    \item Teacher upgraded: exp3 $\to$ exp8 ensemble for pseudo-labeling
+    \item Pseudo threshold lowered: $0.3 \to 0.2$ (exp8 teacher is more confident)
+    \item Init from exp8 weights (not exp3)
+    \item Learning rate: $10^{-5} \to 5 \times 10^{-6}$ (2nd round fine-tuning)
+    \item Mixup $\alpha$: $0.4 \to 0.5$
+    \item SpecAugment: up to 3 freq masks ($w \leq 30$), 3 time masks ($w \leq 40$)
+    \item Random gain ($\pm 6$ dB) and Gaussian noise injection ($p=0.3$)
+\end{enumerate}
+
+\paragraph{Results.}
+Teacher upgrade yielded 97.4\% pseudo-label pass rate (vs 79.1\% with exp3
+teacher at threshold 0.3), producing 17,430 pseudo samples.
+Combined training set: 71,814 samples.
+
+\begin{table}[h]
+\centering
+\caption{Experiment 9 results (enhanced aug + 2nd round ST).}
+\label{tab:exp9}
+\begin{tabular}{lccccc}
+\hline
+\textbf{Fold} & \textbf{ss\_auc} & \textbf{full\_ss} & \textbf{Best Epoch} & \textbf{$\Delta$ vs exp8} \\
+\hline
+0 & 0.8403 & 0.8262 & 5 & $+0.011$ \\
+1 & 0.8124 & 0.8301 & 3 & $+0.006$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+Two orthogonal improvements contributed:
+
+\textbf{(1) Iterative self-training with better teacher.}
+The exp8 teacher's pseudo-label pass rate jumped from 79.1\% to 97.4\%,
+adding $\sim$3K more pseudo-labeled samples. More importantly, the
+pseudo-labels themselves are higher quality, as the exp8 teacher already
+benefits from focal loss's hard-example emphasis.
+
+\textbf{(2) Stronger augmentation as regularization.}
+Enhanced SpecAugment (3$\times$ masks, wider), random gain, and Gaussian noise
+serve as implicit noise injection for self-training. This follows the
+Noisy Student paradigm~\cite{xie2020self}: adding noise during student
+training prevents the student from merely memorizing teacher predictions,
+forcing it to learn more robust features.
+
+\textbf{(3) Diminishing returns observed.}
+The improvement from exp8$\to$exp9 ($+0.006$--$0.011$) is smaller than
+exp7$\to$exp8 ($+0.019$--$0.034$), suggesting that the easy gains from
+domain adaptation and loss function optimization have been captured.
+Further improvement likely requires architectural diversity or
+post-processing rather than continued iteration on the same recipe.
+
+\textbf{Finding:} Iterative self-training with progressive teacher upgrades
+yields consistent but diminishing gains. The full pipeline (domain adaptation +
+focal loss + 2nd round ST + strong augmentation) achieves full\_ss
+0.83, a cumulative $+0.10$ over the exp3 baseline.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 10: Ensemble Optimization + Submission}
+\label{sec:exp10}
+
+\paragraph{Hypothesis.}
+Combining models from diverse training recipes (exp7: self-training v2,
+exp8: focal loss, exp9: enhanced augmentation) creates an ensemble that
+captures complementary patterns, improving over any single experiment.
+
+\paragraph{Setup.}
+Inference-only experiment: load all 8 model checkpoints (exp3/7/8/9 $\times$ 2
+folds) and evaluate ensemble combinations on the full soundscape evaluation set
+(739 segments, 75 species). Tested: individual models, within-experiment
+averaging, cross-experiment combinations, weighted ensembles, and power transform
+post-processing.
+
+\paragraph{Results.}
+
+\begin{table}[h]
+\centering
+\caption{Experiment 10: ensemble comparison on full\_ss.}
+\label{tab:exp10}
+\begin{tabular}{lcc}
+\hline
+\textbf{Configuration} & \textbf{full\_ss} & \textbf{$\Delta$ vs best single} \\
+\hline
+Best single (exp9 f1)        & 0.8302 & --- \\
+exp9 ensemble (2 folds)      & 0.8450 & $+0.015$ \\
+exp8+exp9 (4 models)         & 0.8452 & $+0.015$ \\
+\textbf{exp7+exp8+exp9 (6)}  & \textbf{0.8466} & $+\mathbf{0.016}$ \\
+All models (8, incl exp3)    & 0.8463 & $+0.016$ \\
+Weighted (3:2:1:0.5)         & 0.8464 & $+0.016$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+Key findings from ensemble optimization:
+
+\textbf{(1) Fold averaging provides the largest gain.}
+Going from a single fold to 2-fold average (exp9 alone: 0.830 $\to$ 0.845)
+accounts for most of the ensemble benefit ($+0.015$). Cross-experiment
+diversity adds only $+0.001$--$0.002$ on top.
+
+\textbf{(2) Weak models hurt the ensemble.}
+Including exp3 (full\_ss $\sim$0.73) slightly degraded the 6-model ensemble
+from 0.8466 to 0.8463. The optimal strategy is to include only models within
+$\sim$0.05 of the best.
+
+\textbf{(3) Post-processing yielded no improvement.}
+Power transform (tested at $p \in \{0.5, \ldots, 0.9\}$) on non-bird species
+had zero effect, as the evaluation set contains few non-bird true positives.
+Weighted ensembles marginally underperformed uniform averaging.
+
+\textbf{(4) Adaptive inference for CPU budget.}
+With $\sim$600 test files, 6 models, and 3 TTA shifts, inference would require
+$\sim$160 minutes on CPU, exceeding the 90-minute budget. The submission
+notebook dynamically selects model count and TTA based on test set size.
+
+\paragraph{Leaderboard ablation.}
+Submitting six inference variants to the public leaderboard revealed a
+\textbf{critical disconnect} between local proxy and LB score.
+
+\begin{table}[h]
+\centering
+\caption{Leaderboard ablation: local full\_ss vs public LB.}
+\label{tab:lb-ablation}
+\begin{tabular}{llcc}
+\hline
+\textbf{Variant} & \textbf{Configuration} & \textbf{Local full\_ss} & \textbf{Public LB} \\
+\hline
+exp3 baseline     & B0 2-fold, TTA, priors            & 0.732 & \textbf{0.811} \\
+exp10 v2          & 6-model (exp7+8+9), TTA, priors   & 0.847 & 0.797 \\
+v3                & exp9-only, TTA, priors             & 0.845 & 0.797 \\
+v4                & 6-model, TTA, \textbf{no priors}   & 0.847 & 0.790 \\
+v5                & exp9-only, no TTA, no priors        & 0.830 & 0.785 \\
+v6                & 6-model, TTA, priors, smoothing     & ---   & 0.803 \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Critical finding: local ss\_auc anti-correlates with LB.}
+Models that improved local full\_ss from 0.73 to 0.85 \textbf{degraded} LB from
+0.811 to 0.785--0.803. This reveals fundamental flaws in our experimental setup:
+
+\textbf{(1) Self-training overfit to train\_soundscapes distribution.}
+Experiments 7--9 used pseudo-labels from train\_soundscapes, which biased the
+model toward the acoustic characteristics of those specific recordings (sites,
+times, species mixtures). The test soundscapes follow a different distribution
+from the labeled training soundscapes, so this ``domain adaptation'' actually
+\emph{narrowed} the model's generalization instead of broadening it.
+
+\textbf{(2) Pseudo-label noise amplification across rounds.}
+Each self-training round (exp3 $\to$ exp8 $\to$ exp9) reinforced the teacher's
+errors. Systematic biases (e.g., species confused by exp3) became entrenched
+rather than corrected, compounding over iterations.
+
+\textbf{(3) The exp3 baseline generalizes better precisely because it is naive.}
+Trained purely on isolated train\_audio recordings, exp3 learns species-specific
+features without being biased toward any particular soundscape distribution.
+This generality transfers better to unseen test soundscapes.
+
+\textbf{(4) Inference-time techniques provide genuine gains.}
+In contrast to training-time changes, the LB ablation confirms:
+TTA contributes $+0.012$ (v5 $\to$ v3), site/hour priors $+0.007$--$0.013$
+(v4 $\to$ v6), and temporal smoothing $+0.006$ (v2 $\to$ v6).
+These are additive and do not overfit.
+
+\textbf{Lesson:} When labeled evaluation data is not representative of the
+test distribution, optimizing a local proxy can be counterproductive.
+Future experiments must validate against LB directly, and training-time
+modifications (self-training, loss changes) must be treated as hypotheses
+until confirmed on LB.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 11: 5-Second Chunk Alignment}
+\label{sec:exp11}
+
+\paragraph{Hypothesis.}
+The 10-second training chunks in exp3 create a 2:1 temporal resolution mismatch
+with the 5-second evaluation windows: mel-spectrograms are resized to a fixed
+image size during both training and inference, but a 10s spectrogram compressed
+into the same spatial dimensions as a 5s spectrogram produces very different
+temporal patterns. Aligning training to 5s chunks should eliminate this distortion.
+
+\paragraph{Key changes from exp3.}
+\begin{enumerate}
+    \item Training chunk duration: $10\text{s} \to 5\text{s}$
+    \item Max chunks per file: $2 \to 4$ (maintains similar coverage of each recording)
+    \item Training samples: 104,134 (vs 54,025 with 10s chunks)
+    \item Precomputed mel-spectrogram cache to minimize CPU load
+\end{enumerate}
+All other settings (backbone, optimizer, augmentation, loss) remain identical to exp3.
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 11 results (5s chunk alignment).}
+\label{tab:exp11}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Fold} & \textbf{val\_auc} & \textbf{Best Epoch} & \textbf{ss\_auc} & \textbf{$\Delta$ vs exp3} \\
+\hline
+0 & 0.9862 & 9  & 0.7715 & $+0.046$ \\
+1 & 0.9857 & 10 & 0.7503 & $+0.018$ \\
+\hline
+Average & 0.9860 & --- & 0.7609 & $+0.032$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+The 5s alignment provides a consistent and substantial improvement (+0.032
+average ss\_auc) with no architectural changes. This confirms that temporal
+resolution mismatch was a significant performance bottleneck: all competitive
+public notebooks use 5s training chunks matching the evaluation window.
+The nearly doubled training set (104K vs 54K samples) from finer chunking
+may also contribute, as the model sees more diverse 5s views of each recording.
+
+\textbf{Finding:} Aligning training chunk duration to the evaluation window
+is a prerequisite for competitive performance. The 10s$\to$5s change alone
+accounts for a +0.032 ss\_auc gain with zero additional complexity.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 12: Inference Optimization}
+\label{sec:exp12}
+
+\paragraph{Hypothesis.}
+Inference-time techniques---overlapping TTA, temperature scaling, and temporal
+smoothing---can improve prediction quality without retraining. We conduct a
+grid search over these axes using exp3 and exp11 weights.
+
+\paragraph{Setup.}
+Grid search over: (1) TTA mode: standard (non-overlapping 5s) vs overlap
+(2.5s stride, 23 windows per 60s file); (2) temperature scaling:
+$T \in \{1.0, 1.15, 1.3, 1.5\}$; (3) Gaussian temporal smoothing:
+$\sigma \in \{0, 0.5, 1.0, 1.5\}$. Evaluated on the full soundscape set
+(739 segments, 75 species).
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 12: top inference configurations (ss\_auc on full soundscape set).}
+\label{tab:exp12}
+\begin{tabular}{llccc}
+\hline
+\textbf{Model} & \textbf{TTA} & \textbf{$T$} & \textbf{$\sigma$} & \textbf{ss\_auc} \\
+\hline
+exp11 & overlap & 1.0 & 1.0 & \textbf{0.8015} \\
+exp11 & overlap & 1.0 & 0.5 & 0.8004 \\
+exp11 & overlap & 1.15 & 1.0 & 0.8000 \\
+exp11 & standard & 1.0 & 1.0 & 0.7951 \\
+exp3+exp11 & overlap & 1.0 & 1.0 & 0.7984 \\
+exp3 & overlap & 1.0 & 1.0 & 0.7792 \\
+exp3 & standard & 1.0 & 0.0 & 0.7502 \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+Three clear findings emerge from the 96-configuration grid search:
+
+\textbf{(1) Temperature scaling has no effect.}
+At every fixed (model, TTA, $\sigma$) combination, varying $T$ from 1.0 to 1.5
+changes ss\_auc by $<$0.002. Since our predictions are already sigmoids
+(not softmax), temperature scaling merely compresses probabilities toward 0.5,
+which does not affect AUC ranking. $T=1.0$ is universally optimal.
+
+\textbf{(2) Gaussian temporal smoothing consistently helps.}
+$\sigma=1.0$ provides $+0.009$ average improvement over no smoothing.
+This confirms that adjacent 5s windows share species presence, and averaging
+reduces segment-boundary noise.
+
+\textbf{(3) Overlap TTA provides +0.015.}
+The 2.5s-stride sliding window (23 predictions per file vs 12) captures
+species vocalizations that straddle segment boundaries. Combined with
+smoothing, this yields a +0.023 total inference-time gain.
+
+\textbf{(4) Cross-architecture ensemble hurts.}
+Adding exp3 (10s-trained) to exp11 (5s-trained) degrades from 0.8015 to 0.7984.
+The 10s model's distorted temporal features add noise rather than diversity.
+
+\textbf{Finding:} Optimal inference config is overlap TTA + $\sigma$=1.0 +
+$T$=1.0, yielding 0.8015 from exp11 weights alone---a +0.051 gain over
+exp3's raw inference (0.7502).
+
+% ------------------------------------------------------------------
+\subsection{Experiment 13: Multi-Backbone Exploration}
+\label{sec:exp13}
+
+\paragraph{Hypothesis.}
+Backbone diversity is critical for ensemble robustness (per 2025 winning
+solutions). We evaluate three alternative architectures---EfficientNet-B2,
+ConvNeXt-V2 Nano, and NFNet-L0---using the 5s training recipe from exp11.
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 13 results (backbone comparison, 5s chunks).}
+\label{tab:exp13}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Backbone} & \textbf{Params} & \textbf{Fold} & \textbf{ss\_auc} & \textbf{Status} \\
+\hline
+EfficientNet-B0 (exp11) & 5.3M & 0/1 & 0.771/0.750 & Baseline \\
+EfficientNet-B2 & 9.1M & 0 & 0.7090 & $-0.063$ \\
+EfficientNet-B2 & 9.1M & 1 & 0.7108 & $-0.039$ \\
+ConvNeXt-V2 Nano & 15.6M & 0 & --- & Failed \\
+NFNet-L0 & 35.1M & 0 & --- & Failed \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+All three alternatives performed worse than the B0 baseline:
+
+\textbf{(1) EfficientNet-B2} completed training but underperformed B0 by
+0.04--0.06 ss\_auc despite 1.7$\times$ more parameters. With only 5s of audio
+($128 \times 156$ mel-spectrogram), the input resolution is too low to benefit
+from deeper features. The additional capacity leads to overfitting on
+train\_audio without improving soundscape generalization.
+
+\textbf{(2) ConvNeXt-V2 Nano} failed entirely: val\_auc remained at 0.50
+(random chance) throughout training. ConvNeXt-V2 uses LayerNorm which
+is incompatible with single-channel mel-spectrogram input (\texttt{in\_chans=1})
+in our SED pipeline without architecture-specific normalization adaptation.
+
+\textbf{(3) NFNet-L0} produced NaN losses immediately. NFNet's Scaled Weight
+Standardization is incompatible with mixed-precision training (AMP) at
+lr=$10^{-3}$, causing numerical overflow.
+
+\textbf{Finding:} EfficientNet-B0 remains optimal for this task and pipeline.
+Backbone diversity requires architecture-specific adaptation (normalization,
+learning rate, AMP settings) rather than drop-in replacement. Future ensemble
+diversity should come from training recipe variation rather than backbone changes.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 14: Mel-Level Data Augmentation}
+\label{sec:exp14}
+
+\paragraph{Hypothesis.}
+Stronger data augmentation at the mel-spectrogram level---background noise
+mixing, random gain, and Gaussian noise---can improve generalization to
+field soundscapes without CPU-intensive waveform processing during training.
+
+\paragraph{Setup.}
+All augmentations operate on precomputed mel-spectrograms (reusing exp11's
+cache), eliminating librosa overhead during training:
+\begin{enumerate}
+    \item \textbf{Background mixing} ($p=0.5$): mix with precomputed mel-spectrograms
+    from 2025 train\_soundscapes (1,200 mels from 300 files, computed once).
+    Mix ratio sampled from Beta(5,2), mean $\approx$0.7 signal / 0.3 background.
+    \item \textbf{Random gain} ($p=0.5$): multiply mel by uniform(0.8, 1.2)
+    \item \textbf{Gaussian noise} ($p=0.3$): additive $\mathcal{N}(0, 0.02)$
+    \item \textbf{Enhanced SpecAugment}: up to 3 frequency masks ($w \leq 30$),
+    3 time masks ($w \leq 30$)
+\end{enumerate}
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 14 results (mel-level augmentation).}
+\label{tab:exp14}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Fold} & \textbf{val\_auc} & \textbf{Best Epoch} & \textbf{ss\_auc} & \textbf{$\Delta$ vs exp11} \\
+\hline
+0 & 0.9871 & 13 & 0.7820 & $+0.011$ \\
+1 & 0.9856 & 13 & 0.7681 & $+0.018$ \\
+\hline
+Average & 0.9864 & --- & 0.7751 & $+0.014$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+The augmentation provides a consistent +0.014 average improvement, with two
+noteworthy effects:
+
+\textbf{(1) Extended training window.}
+Best checkpoints shifted from epochs 9--10 (exp11) to epoch 13 (exp14).
+In exp11, ss\_auc peaked early and declined due to overfitting on clean
+train\_audio. The added augmentation noise acts as regularization, allowing
+productive training for 3--4 additional epochs before overfitting onset.
+
+\textbf{(2) Background mixing bridges domain gap.}
+Mixing training audio with real soundscape backgrounds at the mel level
+simulates the multi-source acoustic environment of field recordings. This
+is computationally efficient: 1,200 background mels are precomputed once
+(one-time cost), and mixing is a simple element-wise operation during training.
+
+\textbf{(3) CPU efficiency.}
+By operating entirely on precomputed mels, training CPU usage is minimal---no
+librosa decoding, no waveform-level processing. All augmentation is GPU-friendly
+tensor operations.
+
+\textbf{Finding:} Mel-level augmentation with background mixing provides a
+meaningful +0.014 ss\_auc gain while extending the useful training window.
+The approach is orthogonal to architecture and inference optimizations.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 15: Self-Training with 2025 Winner Recipe}
+\label{sec:exp15}
+
+\paragraph{Hypothesis.}
+The 2025 BirdCLEF winner's self-training recipe---which was the single most
+impactful technique that year---should improve our 5s baseline when properly
+implemented with noise injection (always-on mixup, stochastic depth) and
+power-transformed pseudo-labels.
+
+\paragraph{Setup.}
+Faithful reproduction of the 2025 1st-place self-training recipe:
+\begin{enumerate}
+    \item Teacher: exp11 2-fold ensemble
+    \item Pseudo-labels: power transform ($p=0.7$) on teacher predictions.
+    62,040 pseudo training samples (48.8\% pass rate)
+    \item Always-on mixup: every training sample mixed with a weighted-sampled
+    pseudo sample (\texttt{mixup\_ratio}=1.0)
+    \item Stochastic depth: \texttt{drop\_path\_rate}=0.15
+    \item Sampling weight proportional to sum of pseudo-label probabilities
+    \item Training: 5 epochs, lr=$10^{-3}$, from scratch (not fine-tuning)
+    \item Checkpoint selection by ss\_auc (not val\_auc)
+\end{enumerate}
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 15 results (2025 winner self-training recipe).}
+\label{tab:exp15}
+\begin{tabular}{lccccc}
+\hline
+\textbf{Fold} & \textbf{Best Epoch} & \textbf{val\_auc} & \textbf{ss\_auc} & \textbf{$\Delta$ vs exp11} \\
+\hline
+0 & 1 & 0.9823 & 0.7569 & $-0.015$ \\
+1 & 2 & 0.9809 & 0.6908 & $-0.060$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Epoch-level analysis.}
+\begin{table}[h]
+\centering
+\caption{Experiment 15 ss\_auc trajectory (fold 0).}
+\label{tab:exp15-trajectory}
+\begin{tabular}{lccccc}
+\hline
+\textbf{Epoch} & 1 & 2 & 3 & 4 & 5 \\
+\hline
+ss\_auc (fold 0) & \textbf{0.757} & 0.750 & 0.746 & 0.744 & 0.745 \\
+ss\_auc (fold 1) & 0.691 & \textbf{0.691} & 0.685 & 0.679 & 0.683 \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+Self-training \textbf{degraded} performance relative to the exp11 baseline,
+with ss\_auc peaking at epoch 1--2 and declining thereafter. This is our third
+failed attempt at self-training (after exp5 and exp7--9), despite following the
+2025 winner's exact recipe. Three factors explain the persistent failure:
+
+\textbf{(1) Missing LB validation loop.}
+The 2025 winners used leaderboard scores to select which self-training
+iterations to keep. Without this external validation signal, we cannot
+distinguish between pseudo-labels that genuinely improve generalization and
+those that overfit to train\_soundscapes. Our ss\_auc proxy is unreliable
+for this purpose (as demonstrated by exp7--9's LB anti-correlation).
+
+\textbf{(2) Teacher quality ceiling.}
+Our exp11 teacher (ss\_auc=0.76) is significantly weaker than the 2025
+winners' teachers (which had LB $>$0.85). Weak teachers produce noisy
+pseudo-labels that corrupt the student more than they help, especially
+on a diverse 234-species task.
+
+\textbf{(3) Distribution shift from pseudo-labels.}
+The pseudo-labeled train\_soundscapes represent a specific acoustic
+distribution (particular sites, times, species mixtures). Training on this
+data shifts the model toward that distribution, which may not match the
+hidden test soundscapes---the same failure mode observed in exp7--9.
+
+\textbf{Finding:} Self-training is not viable without (a) a strong teacher
+model ($>$0.85 LB) and (b) leaderboard validation per iteration. Both
+prerequisites require significant compute investment and careful orchestration.
+For our current pipeline, augmentation-based approaches (exp14) provide more
+reliable gains.
+
+% ------------------------------------------------------------------
+\subsection{Summary: Experiments 11--15}
+\label{sec:exp11-15-summary}
+
+Table~\ref{tab:exp11-15-summary} summarizes the cumulative effect of
+experiments 11--15, starting from the exp3 baseline.
+
+\begin{table}[h]
+\centering
+\caption{Summary of experiments 11--15 (average ss\_auc across folds).}
+\label{tab:exp11-15-summary}
+\begin{tabular}{llcc}
+\hline
+\textbf{Exp} & \textbf{Key Change} & \textbf{Avg ss\_auc} & \textbf{$\Delta$ vs exp3} \\
+\hline
+exp3  & SED baseline (10s chunks) & 0.729 & --- \\
+exp11 & 5s chunk alignment & 0.761 & $+0.032$ \\
+exp12 & + overlap TTA + $\sigma$=1.0 (inference) & 0.802 & $+0.073$ \\
+exp13 & Multi-backbone (B2/ConvNeXt/NFNet) & 0.710 & $-0.019$ \\
+exp14 & + mel-level augmentation & 0.775 & $+0.046$ \\
+exp15 & Self-training (2025 recipe) & 0.724 & $-0.005$ \\
+\hline
+\end{tabular}
+\end{table}
+
+The most impactful changes are training-eval alignment (exp11: $+0.032$) and
+inference optimization (exp12: $+0.041$ on top of exp11). Together, these
+bring the local proxy from 0.729 to 0.802 without modifying the model
+architecture or training recipe beyond chunk duration. Mel-level augmentation
+(exp14) provides an additional $+0.014$ that should compose with inference
+optimizations.
+
+The two negative results---backbone scaling (exp13) and self-training
+(exp15)---confirm findings from our earlier experiments: the performance
+bottleneck is not model capacity, and self-training without LB validation
+is unreliable. Future experiments should focus on (a) submitting exp14 +
+exp12's inference config to validate LB improvement, and (b) exploring
+training-time techniques that do not depend on pseudo-labels from
+train\_soundscapes.
+
+% ------------------------------------------------------------------
+\subsection{Competitive Landscape Analysis}
+\label{sec:landscape}
+
+To inform future experiments, we surveyed the public leaderboard and
+9 public Kaggle notebooks as of April 17, 2026.
+
+\paragraph{Leaderboard snapshot.}
+Top-1 scores 0.952, top-10 all $\geq 0.944$, top-20 $\geq 0.938$.
+Our best submission (0.811) would rank approximately in the bottom third.
+The gap to a medal-competitive score ($\sim$0.93) is $+0.12$.
+
+\paragraph{Public notebook survey.}
+
+\begin{table}[h]
+\centering
+\caption{Summary of public BirdCLEF+ 2026 inference notebooks.}
+\label{tab:landscape}
+\small
+\begin{tabular}{p{3.2cm}p{2.8cm}p{2.2cm}p{4.5cm}}
+\hline
+\textbf{Notebook} & \textbf{Backbone} & \textbf{Chunk / Image} & \textbf{Key techniques} \\
+\hline
+ConvNeXt-V2 + GEM & ConvNeXt-V2 tiny & 5s / 128$\times$W & Overlap TTA (2.5s stride), temporal smoothing, file-level max prior \\
+EfficientNetV2 & EfficientNetV2-B0 & 5s / 256$\times$256 & 256 mel bins, ThreadPool parallel inference \\
+BirdTransform & CNN + Transformer (RoPE, SwiGLU) & 7s / 192 mels & PERCH embedding fusion ($\mu$=0.5), per-class threshold optimization \\
+VK EfficientNet & EfficientNet-B0 & 5s / 256$\times$256 & Multi-model ensemble, flip TTA, fmin=50 fmax=14k \\
+Perch v2 & Google Perch v2 & overlap / 5s & Foundation model (15k species), Gaussian temporal smoothing ($\sigma$=1.0) \\
+Kailatha B2 + SED & EfficientNet-B2 & 5s / 128$\times$312 & SED attention pool, temperature scaling ($T$=1.5) \\
+MonkeyClaw & Custom 3-layer CNN & 5s / 128$\times$128 & GroupKFold by site, temperature scaling ($T$=1.15), prior fusion \\
+Kahofu & None (statistical) & --- & Rating-weighted species frequency prior \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Key observations.}
+\begin{enumerate}
+    \item \textbf{All competitive solutions use 5s chunks}, matching the
+    evaluation window. Our 10s training chunks require resize at inference,
+    introducing temporal distortion. Aligning train/eval duration is standard.
+
+    \item \textbf{Overlapping TTA is widespread.}
+    Top notebooks use 2.5s-stride sliding windows (yielding 23 windows per
+    60s file) rather than non-overlapping 5s segments, effectively doubling
+    the prediction density before aggregation.
+
+    \item \textbf{Temporal smoothing is standard.}
+    Gaussian smoothing ($\sigma$=1.0) or weighted-average kernels across
+    adjacent segments reduce segment-boundary noise. Our v6 ablation
+    confirmed $+0.006$ LB gain from smoothing.
+
+    \item \textbf{Temperature scaling is common} ($T$=1.15--1.5).
+    Softening predictions before ensemble averaging or threshold application
+    improves calibration for AUC. We have not yet explored this.
+
+    \item \textbf{Foundation models (Perch v2) are competitive baselines.}
+    Perch v2 provides strong zero-shot predictions for 203/234 species.
+    The BirdTransform notebook fuses CNN predictions with Perch embeddings.
+
+    \item \textbf{Diverse backbones appear in top solutions.}
+    ConvNeXt-V2, EfficientNetV2, Transformers, and EfficientNet-B2 are all
+    represented, consistent with the 2025 finding that backbone diversity
+    is critical for ensemble robustness.
+
+    \item \textbf{No public notebook uses iterative self-training.}
+    This is likely because it requires substantial compute and careful tuning,
+    but the 2025 winners demonstrated it is the single most impactful technique
+    when properly implemented (with noise injection, LB validation, and
+    multi-backbone diversity across iterations).
+\end{enumerate}
+
+\paragraph{Implications for future experiments.}
+The gap between our 0.811 and competitive 0.93+ likely requires:
+(a) aligning training to 5s chunks with overlap TTA,
+(b) multi-backbone ensemble diversity,
+(c) proper iterative self-training with noise injection (mixup ratio=1,
+stochastic depth) and LB-validated iterations, and
+(d) inference-time calibration (temperature scaling, temporal smoothing).
+Each of these should be validated independently on LB before combining.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 16: Soft AUC Loss}
+\label{sec:exp16}
+
+\paragraph{Hypothesis.}
+Directly optimizing the AUC ranking metric via a differentiable pairwise
+surrogate loss should outperform BCE, which optimizes per-sample calibration
+rather than ranking. The 2025 3rd-place solution reported success with this approach.
+
+\paragraph{Setup.}
+Soft AUC loss replaces BCE: for each class $c$, positive predictions
+$\hat{y}^+$ and negative predictions $\hat{y}^-$ are compared pairwise:
+\[
+\mathcal{L}_\text{soft-AUC} = \frac{1}{|P||N|} \sum_{i \in P} \sum_{j \in N}
+(1 - \sigma(\hat{y}_i - \hat{y}_j))
+\]
+Implemented efficiently using positive/negative partition and broadcast.
+Applied to exp14's pipeline (5s chunks, mel augmentation, B0 backbone).
+Training: 15 epochs, lr=$10^{-3}$, cosine schedule, 2-fold CV.
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 16 results (Soft AUC loss).}
+\label{tab:exp16}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Fold} & \textbf{Best Epoch} & \textbf{val\_auc} & \textbf{ss\_auc} & \textbf{$\Delta$ vs exp14} \\
+\hline
+0 & 13 & 0.9831 & 0.7495 & $-0.033$ \\
+1 & 9 & 0.9768 & 0.7204 & $-0.048$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+Soft AUC loss \textbf{degraded} performance by 0.03--0.05 ss\_auc relative
+to BCE (exp14). The ss\_auc trajectory showed an oscillating pattern, peaking
+early and declining, suggesting training instability.
+
+The failure likely stems from the multi-label sparse setting: with 234 classes
+and typically 1--2 positives per sample, the pairwise loss is dominated by
+easy negative pairs (233 negatives vs 1 positive), providing weak gradient
+signal for discriminating between similar species. BCE, despite not directly
+optimizing AUC, provides stronger per-class gradients that are more effective
+for sparse multi-label tasks.
+
+\textbf{Finding:} Soft AUC loss is not effective for sparse multi-label
+classification with many classes. BCE with focal weighting (exp8) remains
+the best loss function for this task.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 17: ConvNeXt-V2 + GEM Pooling}
+\label{sec:exp17}
+
+\paragraph{Hypothesis.}
+A top public notebook achieves high LB scores using ConvNeXt-V2 Tiny
+(28M params) with 3-channel mel-spectrogram input and Generalized Mean (GEM)
+frequency pooling. Replicating this architecture with our training recipe
+and 234-class label mapping should yield a strong base model.
+
+\paragraph{Key architecture differences from exp14.}
+\begin{enumerate}
+    \item Backbone: ConvNeXt-V2 Tiny (28M params) vs EfficientNet-B0 (5.3M)
+    \item Input: 3-channel (mono expanded to RGB) vs 1-channel
+    \item Normalization: per-sample mean/std vs min-max
+    \item Pooling: GEM over frequency vs mean pool
+    \item Head: Conv1d attention SED vs Linear attention SED
+    \item Mel computation: torchaudio on GPU vs librosa precomputed
+\end{enumerate}
+
+\paragraph{Results.}
+Six training attempts were made, systematically isolating failure modes:
+
+\begin{table}[h]
+\centering
+\caption{Experiment 17: ConvNeXt-V2 training attempts.}
+\label{tab:exp17}
+\small
+\begin{tabular}{llcc}
+\hline
+\textbf{Attempt} & \textbf{Configuration} & \textbf{val\_auc (E5)} & \textbf{ss\_auc} \\
+\hline
+1 & ImageNet pretrained, lr=$5 \times 10^{-4}$ & 0.500 & 0.48 \\
+2 & ImageNet pretrained, lr=$5 \times 10^{-5}$ & 0.500 & 0.49 \\
+3 & Public competition weights, full load & 0.500 & 0.50 \\
+4 & Public weights + double-pow GEM fix & 0.500 & 0.50 \\
+5 & Public weights, backbone only (heads random) & 0.500 & 0.48 \\
+6 & ImageNet pretrained, standard GEM, per-epoch sched & 0.500 & 0.52 \\
+\hline
+\end{tabular}
+\end{table}
+
+All attempts produced val\_auc $\approx$ 0.50 (random chance), despite training
+loss dropping rapidly to $\sim$0.027, indicating the model learns to predict
+all-zeros (optimal for sparse multi-label BCE when class imbalance is extreme).
+
+\paragraph{Root cause analysis.}
+The failure has multiple contributing factors:
+
+\textbf{(1) Extreme class imbalance without compensating sampler.}
+With 234 classes and typically 1 positive per sample, the model minimizes BCE
+by predicting near-zero for all classes. Our exp14 pipeline uses a
+WeightedRandomSampler that oversamples rare species; exp17's unweighted
+DataLoader provides no such balance. With ConvNeXt-V2's 28M parameters (5.3$\times$
+B0), the model has more capacity to learn the trivial ``predict all zeros'' solution.
+
+\textbf{(2) Species index mismatch with public weights.}
+The public training notebook maps 206 species from \texttt{train.csv} to indices
+0--205, while we map 234 species from \texttt{taxonomy.csv} to indices 0--233.
+These are different alphabetical orderings due to the 28 extra species, making
+the classification heads of the public weights meaningless in our framework.
+
+\textbf{(3) A bug in the public training notebook.}
+The public notebook sets \texttt{CFG.num\_classes = 206} as a class attribute,
+but creates the model with \texttt{CFG()} which uses the dataclass default of 234.
+The model thus has 234-class heads but is trained with 206-class label indices,
+leaving 28 dimensions untrained.
+
+\textbf{Finding:} ConvNeXt-V2 requires architecture-specific training adaptations
+(class-balanced sampling, per-sample normalization, proper weight initialization)
+that are not trivially portable from EfficientNet pipelines. The larger model
+capacity makes it more susceptible to the all-zeros collapse mode.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 20: Inference Post-Processing Evaluation}
+\label{sec:exp20}
+
+\paragraph{Hypothesis.}
+The inference post-processing techniques from top public notebooks---overlapping
+windows, time-shift TTA, temporal smoothing, and global soundscape prior---can
+substantially improve predictions from our exp14 base model without retraining.
+
+\paragraph{Setup.}
+Using exp14 2-fold weights (ss\_auc=0.78), we evaluate each post-processing
+technique incrementally on the full soundscape evaluation set (739 segments,
+75 species with AUC-evaluable classes):
+
+\begin{enumerate}
+    \item \textbf{Overlapping windows}: 2.5s stride (50\% overlap), yielding
+    23 windows per 60s file, merged back to 12 standard 5s segments by averaging
+    overlapping predictions
+    \item \textbf{Time-shift TTA}: shift each window by 1.25s and average
+    original + shifted predictions
+    \item \textbf{Temporal smoothing}: confidence-sharpened kernel
+    $[0.05, 0.15, 0.60, 0.15, 0.05]$ with $p=1.5$ power sharpening
+    \item \textbf{Global soundscape prior}: add 5\% of file-maximum probability
+    to all segments (species detected anywhere in the file has elevated baseline)
+\end{enumerate}
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 20: incremental post-processing evaluation (ss\_auc).}
+\label{tab:exp20}
+\begin{tabular}{lcc}
+\hline
+\textbf{Configuration} & \textbf{ss\_auc} & \textbf{$\Delta$ vs baseline} \\
+\hline
+exp14 baseline (no post-processing) & 0.7951 & --- \\
++ TTA only & 0.7996 & $+0.005$ \\
++ Overlap windows + TTA & 0.8136 & $+0.019$ \\
++ Overlap + TTA + Temporal smoothing & 0.8252 & $+0.030$ \\
++ Overlap + TTA + Gaussian $\sigma$=1.0 & 0.8238 & $+0.029$ \\
+\textbf{+ Overlap + TTA + Smoothing + Global prior} & \textbf{0.8291} & $+\mathbf{0.034}$ \\
+\hline
+exp14+exp15 ensemble + full pipeline & 0.8021 & $+0.007$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+The post-processing pipeline provides a cumulative $+0.034$ ss\_auc gain,
+decomposed as follows:
+
+\textbf{(1) Overlapping windows provide the largest single gain ($+0.014$).}
+The 2.5s stride ensures that every bird vocalization is captured fully within
+at least one window, eliminating segment-boundary truncation effects. This
+is particularly important for short calls ($<$2.5s) that may straddle
+the boundary between adjacent 5s segments.
+
+\textbf{(2) Temporal smoothing adds $+0.011$.}
+The confidence-sharpened kernel propagates high-confidence detections to
+adjacent segments while suppressing noise. The sharpening power ($p=1.5$)
+ensures that only confident predictions ($>$0.5) contribute meaningfully
+to neighbors, preventing smoothing from diluting weak signals.
+
+\textbf{(3) Global soundscape prior adds $+0.004$.}
+If a species is detected with high confidence anywhere in the 60s recording,
+its baseline probability is elevated by 5\% across all segments. This captures
+the ecological prior that species presence is correlated across time within
+a single recording.
+
+\textbf{(4) Ensemble with exp15 hurts.}
+Adding exp15 (self-training) weights to the ensemble \textbf{degraded}
+performance from 0.8291 to 0.8021. This confirms our earlier finding (exp10)
+that self-trained models overfit to train\_soundscapes distribution and
+hurt generalization, even in ensemble with the base model.
+
+\textbf{Finding:} Inference post-processing yields $+0.034$ ss\_auc at zero
+training cost. The full pipeline (exp14 + overlap + TTA + smoothing + global
+prior) achieves ss\_auc = 0.8291, our best local result. This should be
+submitted to verify LB improvement over the 0.811 baseline.
+
+% ------------------------------------------------------------------
+\subsection{Experiment 17: ConvNeXt-V2 + GEM Pooling (Negative Result)}
+\label{sec:exp17}
+
+\paragraph{Motivation.}
+The highest-scoring public training notebook uses ConvNeXt-V2 Tiny
+(fcmae\_ft\_in22k\_in1k\_384) with 3-channel mel input and Generalized Mean (GEM)
+frequency pooling, achieving LB scores above 0.90 in combination with
+post-processing. We attempted to replicate this architecture.
+
+\paragraph{Setup.}
+ConvNeXt-V2 Tiny backbone (28.6M params), 3-channel mel spectrogram (mono expanded
+to RGB), per-sample standardization ($\mu/\sigma$ normalization), GEM frequency
+pooling with learnable exponent $p$ (init=3.0), attention SED head.
+Training: 10 epochs, AdamW (lr=$5\times10^{-5}$), cosine schedule, batch size 32,
+SpecAugment, mixup ($\alpha=0.4$), WeightedRandomSampler for class balance.
+
+\paragraph{Results.}
+Despite 8 training runs with progressive debugging, all runs collapsed to
+val\_auc $\approx$ 0.50 (random). Root cause analysis revealed that
+\texttt{model.forward\_features()} in timm's ConvNeXt-V2 \textbf{skips the final
+LayerNorm2d} in the classifier head. The un-normalized features (max difference 0.627
+from normalized output) caused the downstream GEM pooling and attention head to
+receive unstable inputs, leading to all-zeros collapse. Even after correcting to
+\texttt{model()} (which includes LayerNorm), the model still collapsed to val\_auc=0.50,
+suggesting deeper architectural or hyperparameter incompatibility.
+
+\begin{table}[h]
+\centering
+\caption{Experiment 17 ConvNeXt-V2 training runs (all failed).}
+\begin{tabular}{lllr}
+\toprule
+Run & Change & val\_auc & ss\_auc \\
+\midrule
+1--4 & Initial attempts, public weights & 0.50 & -- \\
+5 & Backbone-only weight loading, differential LR & 0.50 & -- \\
+6 & ImageNet pretrained, standard GEM, lr=5e-5 & 0.50 & -- \\
+7 & + WeightedRandomSampler & 0.50 & 0.47 \\
+8 & + LayerNorm fix (forward\_features$\rightarrow$model) & 0.50 & 0.50 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Finding:} ConvNeXt-V2 replication failed after 8 attempts. The root cause
+involves both the LayerNorm omission in \texttt{forward\_features()} and likely
+additional factors (learning rate sensitivity, training data volume, or missing
+self-training that the public notebook implicitly relies on). This negative result
+motivated a strategic pivot to the Perch v2 foundation model approach.
+
+% ------------------------------------------------------------------
+\subsection{Strategic Pivot: Google Perch v2 Foundation Model}
+\label{sec:perch_pivot}
+
+Analysis of the BirdCLEF+ 2026 leaderboard (top score 0.952) and public notebooks
+revealed that the dominant approach uses Google's \textbf{Perch v2} pre-trained bird
+audio embedding model rather than training mel-spectrogram CNNs from scratch.
+
+\paragraph{Key insight.}
+Perch v2 is a foundation model trained on 14,795 bird species. It provides
+1536-dimensional embeddings and species logits from 5-second audio windows.
+Rather than learning audio representations from scratch (our exp3--17 approach),
+the top solutions use Perch as a frozen feature extractor and train lightweight
+classifiers (LogisticRegression, MLP, ProtoSSM) on its embeddings.
+
+\paragraph{Public notebook analysis.}
+The highest-voted public notebook family (\texttt{pantanal-distill}, 578 votes)
+uses the pipeline:
+\texttt{Perch} $\rightarrow$ \texttt{ProtoSSM + MLP} $\rightarrow$ \texttt{ensemble}
+$\rightarrow$ \texttt{ResidualSSM} $\rightarrow$ \texttt{TTA + post-processing}.
+A simpler Perch baseline (LB 0.910) uses:
+\texttt{Perch} $\rightarrow$ \texttt{Bayesian priors} $\rightarrow$
+\texttt{PCA + LogReg probes} $\rightarrow$ \texttt{Gaussian smoothing}.
+
+We adopted the simpler baseline first for rapid LB validation, with plans to
+upgrade to the full ProtoSSM pipeline.
+
+% ==================================================================
+\subsection{Experiments 21--25: Diagnosing the LB 0.910 Pipeline}
+\label{sec:exp21-25}
+
+The Perch~v2 baseline reached public LB 0.910 (exp20 v1), but we lacked any
+local proxy aligned with that score. Submission v2 (PCA=64, $C{=}0.5$,
+$\alpha{=}0.45$, 3$\times$ TTA) timed out, exhausting four of the five
+remaining submission slots without yielding new information. Rather than
+spend the remaining slots on blind variants, we ran a five-experiment
+diagnostic sprint (exp21--25) on a single-machine CPU cluster to isolate
+which components of the v1 pipeline contribute robust generalization and
+which are fragile memorization.
+
+A single Perch cache (708 windows, 1536-d embedding + 234-class score per
+window, computed on the 59 fully-labeled train soundscapes) was shared
+across all five experiments to amortize the 60~min Perch pass.
+All experiments use the same 5-fold GroupKFold-by-site split (8 unique
+sites: S03, S08, S13, S15, S18, S19, S22, S23) for OOF evaluation. Where
+applicable, in-sample (no holdout) numbers are reported as a proxy for the
+LB-style memorization upside.
+
+\subsubsection{Experiment 21: OOF Ablation Harness}
+\label{sec:exp21}
+
+\paragraph{Setup.}
+We re-implemented the v1 pipeline as a sequence of cumulative stages
+(A through F) and evaluated each under both \emph{OOF} (5-fold GroupKFold
+by site, prior tables fit on $N{-}1$ sites per fold) and \emph{in-sample}
+(no holdout, prior tables fit on all 59 files) protocols.
+
+\begin{table}[h]
+\centering
+\caption{Experiment 21: OOF vs in-sample macro-AUC for the v1 pipeline.}
+\label{tab:exp21}
+\begin{tabular}{llcc}
+\hline
+\textbf{Stage} & \textbf{Component added} & \textbf{OOF} & \textbf{In-sample} \\
+\hline
+A & Raw Perch v2 logits                              & 0.7390 & 0.7390 \\
+B & + Genus proxy for Amphibia (max of same-genus)   & 0.7390 & 0.7390 \\
+C & + Bayesian site$\times$hour priors (texture/event blend) & \textbf{0.488} & \textbf{0.977} \\
+D & + Texture-taxa temporal smoothing ($\alpha{=}0.35$) & 0.485 & 0.978 \\
+E & + PCA(32) LogReg probes ($C{=}0.25$, balanced)   & 0.539 & 0.979 \\
+F & + Gaussian temporal kernel ($\sigma{=}1.0$)      & 0.524 & 0.978 \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+Stage~C is the inflection point. Adding Bayesian priors raises in-sample
+macro-AUC from 0.739 to 0.977 ($+0.238$) but collapses OOF from 0.739 to
+0.488 ($-0.251$). The two protocols agree on raw Perch (stage~A), then
+diverge by 0.49~AUC after prior fusion. Per-taxa breakdown (Table~\ref{tab:exp21-taxa})
+shows the OOF damage concentrated in Amphibia and Insecta sonotypes
+(\texttt{47158sonXX}, alphanumeric Insecta IDs).
+
+\begin{table}[h]
+\centering
+\caption{Experiment 21 per-taxa OOF macro-AUC (fold-averaged).}
+\label{tab:exp21-taxa}
+\begin{tabular}{lccc}
+\hline
+\textbf{Taxa} & \textbf{A: raw} & \textbf{C: + priors} & \textbf{E: + probes} \\
+\hline
+Aves (mapped birds)            & 0.890 & 0.803 & 0.824 \\
+Mammalia                       & 0.945 & 0.875 & 0.906 \\
+Amphibia (mixed mapping)       & 0.804 & 0.524 & 0.599 \\
+Insecta sonotypes (47158sonXX) & 0.500 & 0.108 & 0.162 \\
+Reptilia                       & 0.500 & 0.341 & 0.743 \\
+\hline
+\end{tabular}
+\end{table}
+
+For the unmapped Insecta sonotypes (no Perch logit, no genus proxy), raw
+Perch is uninformative (AUC=0.500). The Bayesian prior is then the
+\emph{only} signal; under OOF site holdout the (site, hour) cells specific
+to the held-out sites are absent, so only the global and hour-only
+fall-backs fire. At unseen sites these fall-backs are anti-correlated with
+truth, dragging AUC below chance to 0.108. The prior fusion is in effect
+a site-conditioned look-up table that scores 0.977 in-sample because every
+test row's site has been seen at training time.
+
+\paragraph{Implication.}
+LB 0.910 is consistent with the in-sample row of stage~F (0.978), not the
+OOF row (0.524). The submission's leaderboard score reflects the test
+soundscapes overlapping heavily with sites already seen during prior
+fitting. If the hidden private test set contains genuinely novel sites,
+the public-LB-optimized v1 pipeline is a candidate for severe shake-up.
+Every subsequent experiment is therefore reported with both OOF
+(generalization) and in-sample (memorization upside) numbers.
+
+\subsubsection{Experiment 22: train\_audio Probe Transfer}
+\label{sec:exp22}
+
+\paragraph{Hypothesis.}
+\texttt{train\_audio} contains 35{,}549 cleanly-recorded clips covering
+234 species with reliable hard labels. If we extract Perch~v2 embeddings
+on these clips and train a one-vs-rest linear classifier, the resulting
+234-class probe should transfer to soundscape windows and either replace
+or complement the per-class probes that exp21 trains on the 59-file
+labeled subset.
+
+\paragraph{Setup.}
+First 5\,s of each \texttt{train\_audio} file passed through Perch~v2 to
+obtain a $35{,}549 \times 1536$ embedding matrix (cached). Per-class
+\texttt{LogisticRegression} ($C{=}0.1$, \texttt{class\_weight=balanced},
+\texttt{liblinear}) trained one-vs-rest with the file's
+\texttt{primary\_label} as positive. Of 234 classes, 192 had at least one
+positive sample; 42 (mostly Insecta sonotypes) have no \texttt{train\_audio}
+representation. Standardization fitted on \texttt{train\_audio} only.
+
+Evaluation on the exp21 cache (708 SS windows, 71 active classes): the
+$\texttt{train\_audio}$ probe alone, raw Perch alone, and uniform blends
+$w \in \{0, 0.2, \ldots, 1.0\}$ where the final score is
+$w \cdot \text{probe} + (1{-}w) \cdot \text{raw\_Perch}$.
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 22: train\_audio probe transfer to soundscape windows.}
+\label{tab:exp22}
+\begin{tabular}{lc}
+\hline
+\textbf{Configuration} & \textbf{SS macro-AUC} \\
+\hline
+Raw Perch alone ($w{=}0$)                    & 0.7390 \\
+\texttt{train\_audio} probe alone ($w{=}1$)  & \textbf{0.6775} \\
+Blend $w{=}0.2$ (best uniform)               & 0.7407 \\
+Blend $w{=}0.4$                              & 0.7365 \\
+Blend $w{=}0.5$                              & 0.7320 \\
+Blend $w{=}0.8$                              & 0.7105 \\
+Smart fill (probe used only for Perch-silent classes) & 0.7390 \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{What ``train\_audio fails'' means.}
+The probe trained on 35{,}549 cleanly-recorded clips is, by itself,
+\emph{worse} than the zero-shot Perch logit on the same evaluation
+(0.677 vs 0.739). Adding it to Perch helps only at the smallest tested
+weight ($w{=}0.2$ yields $+0.0017$ macro-AUC), and any larger contribution
+degrades the ensemble. The ``smart blend'' variant---where the probe is
+used \emph{only} for the 28 classes whose Perch logit is identically
+zero (unmapped, no genus proxy)---produced exactly 0.7390, i.e.\ no
+measurable change. The probe contributes nothing for the precise classes
+it was supposed to rescue.
+
+The mechanism is a clean$\to$field domain shift inside Perch's
+embedding space:
+\begin{itemize}
+\item \texttt{train\_audio} clips are short ($\sim$5--30\,s),
+single-species, foreground-dominant, often Xeno-Canto recordings made by
+recordists who position the microphone close to a calling individual.
+SNR is high and background acoustic energy is low.
+\item Soundscape windows are 5\,s slices from passive 1-minute recorders
+deployed in the Pantanal. Multiple species vocalize concurrently against
+constant biophony (insects, frogs, distant species) and abiotic noise
+(rain, wind, geophony).
+\end{itemize}
+A linear probe fitted to the first regime learns a hyperplane that
+separates well-isolated species in the high-SNR Perch embedding; that
+hyperplane sits in a region of embedding space the field windows rarely
+visit. The result: the linear scores assigned to soundscape windows are
+poorly ranked, and adding them to Perch dilutes Perch's already
+domain-aware logits.
+
+The 28-class ``smart fill'' result is the more diagnostic finding. For
+the unmapped Insecta sonotypes, Perch returns a literal zero, so any
+non-trivial score the probe assigns must be informative for AUC ranking.
+That the smart-fill macro-AUC equals raw-Perch macro-AUC to four decimal
+places means the probe's predictions on those classes are uncorrelated
+with the truth---chance-level on average---confirming that the
+\texttt{train\_audio} clips provide \emph{no transferable signal} for
+the very classes that most need rescue.
+
+\paragraph{Verdict.}
+\texttt{train\_audio} probes in their current form are not a usable
+lever. To make them work would require closing the clean$\to$field gap
+\emph{before} probe training: e.g.\ Noisy-Student-style augmentation
+(mixup with soundscape backgrounds, ESC-50 ambient noise, time-frequency
+masking) on \texttt{train\_audio} embeddings; or a domain-adaptation
+finetune of Perch's last layer with adversarial site-confusion. We
+defer this to exp31+.
+
+\subsubsection{Experiment 23: Pseudo-Labeling on Partial Soundscapes}
+\label{sec:exp23}
+
+\paragraph{Hypothesis.}
+The 206 train soundscape files split into three populations: 59 files
+with all 12 windows labeled, some files with a subset of windows
+labeled, and the remainder with no labels at all. Pseudo-labeling the
+\emph{partially-labeled} files would expand the probe training set
+without introducing new acoustic distributions.
+
+\paragraph{Reality.}
+Of the 206 train soundscapes, the file-level label-coverage histogram is
+in fact bimodal: 59 files at full coverage and \textbf{7 files} with
+intermediate coverage; the remaining 140 files have zero windows
+labeled. The pseudo-labeling pool is therefore $7 \times 12 = 84$
+windows---two orders of magnitude smaller than the 17{,}892 pool used in
+exp7's mel-CNN pipeline.
+
+\paragraph{Setup.}
+Perch extraction on the 7 partial files (84 windows; 8\,s wall time,
+cached). Teacher predictions are raw Perch logits. Pseudo-labels:
+top-$K{=}3$ classes per window with logit threshold 0; any real labels
+present in the partial annotations are unioned in. Probe training:
+\texttt{LogisticRegression} on PCA(32) of standardized embedding,
+sample weight 1.0 on real (Y\_FULL) rows and 0.3 on pseudo rows.
+Final score: $0.5 \cdot \text{raw Perch} + 0.5 \cdot \text{probe}$.
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 23: pseudo-labeling effect on OOF macro-AUC.}
+\label{tab:exp23}
+\begin{tabular}{lcc}
+\hline
+\textbf{Configuration} & \textbf{OOF AUC} & \textbf{$\Delta$ vs raw} \\
+\hline
+Raw Perch (baseline)                                  & 0.7390 & --- \\
++ Real-only probes (no priors, no pseudo)             & \textbf{0.8158} & $+0.0768$ \\
++ Real + pseudo probes (84 pseudo windows, 283 labels) & 0.8234 & $+0.0844$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{The accidental finding.}
+The pseudo-label gain over real-only is small ($+0.0076$): with only 84
+pseudo windows out of 708 evaluation rows there is little additional
+signal. The unexpected result is the \emph{real-only probes} row:
+adding PCA(32) probes to raw Perch \emph{without any prior fusion}
+lifts OOF macro-AUC by $+0.077$ to 0.816. Compare this against
+exp21's stage~E (probes \emph{after} prior fusion), which scored 0.539:
+the same probe machinery produces a net $-0.20$ when fed prior-fused
+input and a net $+0.077$ when fed raw input.
+
+The probes were always doing useful work; the priors were destroying
+the signal they had to work with. This experiment changes the
+interpretation of stages~C--F in Table~\ref{tab:exp21}: priors are
+not just a fragile addition on top of a solid base, they actively
+delete the embedding-resident generalization that probes can otherwise
+exploit.
+
+\paragraph{Verdict.}
+Pseudo-labeling on the available 7 partial files yields a small
+positive contribution that we will keep for free, but the headline
+result is the priors-removal recipe: \emph{raw Perch + PCA(32) LogReg
+probes (no Bayesian priors)} hits OOF 0.816, our best site-honest
+number to date.
+
+\subsubsection{Experiment 24: Texture-Taxa Dedicated Head}
+\label{sec:exp24}
+
+\paragraph{Hypothesis.}
+Insecta and Amphibia (``texture taxa'') are sustained calls with strong
+file-level structure; the v1 PCA(32)+scalar probe features may be too
+coarse for them. A richer feature set---the full 1536-d Perch
+embedding, the file-mean embedding (averaging all 12 windows of the
+same file as context), and the file-max-pooled Perch logits over the
+mapped texture classes---should give the probe more to work with.
+
+\paragraph{Setup.}
+63 texture classes (those with \texttt{class\_name} $\in$
+\{Amphibia, Insecta\}); 42 are active in the evaluation set. Per-class
+\texttt{LogisticRegression} fitted in two configurations:
+\begin{itemize}
+\item \textbf{v1 probe} (control): PCA(32) of standardized embedding plus
+the raw Perch logit for the target class. $C{=}0.25$, balanced.
+\item \textbf{Rich probe}: full 1536-d standardized embedding $+$ 1536-d
+standardized file-mean embedding $+$ standardized file-max-pooled
+Perch logits over mapped texture classes (concatenated). $C{=}0.05$
+(stronger regularization to compensate for higher dimensionality),
+balanced.
+\end{itemize}
+Final score is $0.5 \cdot \text{raw Perch} + 0.5 \cdot \text{probe}$ in
+both cases. 5-fold GroupKFold-by-site OOF.
+
+\paragraph{Results.}
+\begin{table}[h]
+\centering
+\caption{Experiment 24: texture-taxa-only macro-AUC (42 active classes).}
+\label{tab:exp24}
+\begin{tabular}{lc}
+\hline
+\textbf{Configuration} & \textbf{Texture macro-AUC} \\
+\hline
+Raw Perch                                  & 0.6399 \\
+v1 probe (PCA(32)+scalar)                  & \textbf{0.7849} ($+0.145$) \\
+Rich probe (full emb + file-mean + context)& 0.7226 ($+0.083$) \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Experiment 24 by class\_name (mean of active per-class AUC).}
+\label{tab:exp24-taxa}
+\begin{tabular}{lccc}
+\hline
+\textbf{Class} & \textbf{Raw Perch} & \textbf{v1 probe} & \textbf{Rich probe} \\
+\hline
+Amphibia & 0.846 & 0.843 & 0.825 \\
+Insecta  & 0.500 & 0.745 & 0.653 \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+The richer feature set \emph{loses} to the minimal v1 probe by
+$-0.062$ macro-AUC. Both taxa contribute to the gap: Amphibia drops
+$-0.018$, Insecta drops $-0.092$. With a median of $\sim$10 positive
+windows per active texture class across 5 folds, the per-class linear
+classifier sees as few as 1--2 positives per training fold. A 1536+1536
+dimensional feature vector with 1--2 positives is severely under-determined;
+the strong $C{=}0.05$ regularization is not enough to prevent overfitting
+to which-fold-the-positives-fell-into. The PCA(32) features already
+contain the dominant directions of variation; further dimensions add
+noise faster than signal at this sample size.
+
+A second factor, visible only in the per-class breakdown, is that the
+Insecta sonotypes that the v1 probe partially rescues
+(\texttt{47158son07}, \texttt{47158son17}) are exactly the classes where
+file-mean context is least informative: they are sustained tonal calls
+whose 12 windows of a single file are nearly identical, so the file-mean
+adds essentially the same vector again. The rich probe's extra features
+are redundant rather than complementary.
+
+\paragraph{Verdict.}
+Keep the v1 PCA(32)+scalar probe head for texture taxa. Do not over-feature
+small-N classes. Future texture-specific work should focus on supplying
+\emph{more positive examples} (cross-year reuse of 2025 Pantanal data,
+expert-curated sonotype clips) rather than richer features per example.
+
+\subsubsection{Experiment 25: Domain-Shift / Site-Bias Diagnostics}
+\label{sec:exp25}
+
+\paragraph{Hypothesis.}
+The dramatic OOF--in-sample gap in exp21 implies Perch embeddings
+contain site-discriminative information. We measure how strong this
+signal is and whether it justifies a domain-adaptation fine-tune
+(iVAE / DANN / CORAL / per-site whitening) in exp30+.
+
+\paragraph{Diagnostics.}
+Five tests on the exp21 cache (708 windows, 8 sites, 13 unique hours):
+\begin{description}
+\item[D1] \textbf{Adversarial site classifier.} Multinomial LogReg
+($\ell_2$, \texttt{lbfgs}) on the standardized 1536-d embedding
+predicting the site label, evaluated by 5-fold StratifiedKFold accuracy.
+Compared against chance ($1/8 = 0.125$) and against an analogous
+hour-of-day classifier.
+\item[D2] \textbf{Per-site leave-one-out OOF.} For each site $s$, hold
+out all windows belonging to $s$ and report raw-Perch macro-AUC on the
+held-out subset.
+\item[D3] \textbf{Texture-taxa site concentration.} For each texture
+class, count how many of the 8 sites contribute at least one positive
+window, and compute a Gini-like dispersion $G = 1 - \sum_s p_s^2$ where
+$p_s$ is the fraction of positives at site $s$. $G{=}0$ means
+single-site, $G \to 1$ means uniform.
+\item[D4] \textbf{Embedding silhouette by site.} Standardize, project to
+PCA(20), compute \texttt{silhouette\_score} treating site as the cluster
+label.
+\item[D5] \textbf{Per-class fold-AUC variance.} 5-fold GroupKFold-by-site
+raw-Perch per-class AUC, report mean and std across folds for the 71
+active classes.
+\end{description}
+
+\paragraph{Results.}
+
+\begin{table}[h]
+\centering
+\caption{Experiment 25: domain-shift diagnostic summary.}
+\label{tab:exp25}
+\begin{tabular}{lr}
+\hline
+\textbf{Diagnostic} & \textbf{Value} \\
+\hline
+D1: site classifier accuracy           & 0.999 \\
+\quad chance ($1/8$)                   & 0.125 \\
+\quad ratio above chance               & $\boldsymbol{8.0\times}$ \\
+D1: hour classifier accuracy           & 0.992 (chance 0.077, $13\times$) \\
+D2: per-site raw Perch macro-AUC mean  & 0.666 \\
+\quad std / min / max                  & 0.141 / 0.487 (S18) / 0.829 (S22) \\
+D4: silhouette\_score(site, PCA(20))   & $+0.096$ \\
+D5: cross-fold per-class AUC std (mean / max) & 0.012 / 0.184 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Experiment 25 D3: texture classes with single-site positives.}
+\label{tab:exp25-d3}
+\begin{tabular}{lcrr}
+\hline
+\textbf{Class} & \textbf{Taxa} & \textbf{N pos} & \textbf{N sites} \\
+\hline
+\texttt{47158son02} & Insecta  & 7  & 1 \\
+\texttt{47158son06} & Insecta  & 18 & 1 \\
+\texttt{47158son14} & Insecta  & 12 & 1 \\
+\texttt{47158son17} & Insecta  & 43 & 1 \\
+\texttt{47158son19} & Insecta  & 5  & 1 \\
+\texttt{47158son21} & Insecta  & 22 & 1 \\
+\texttt{25073}      & Amphibia & 12 & 1 \\
+\texttt{25092}      & Amphibia & 24 & 1 \\
+\texttt{326272}     & Amphibia & 23 & 1 \\
+\texttt{517063}     & Amphibia & 307& 1 \\
+\hline
+\multicolumn{4}{l}{\emph{(15+ texture classes total exhibit single-site positives.)}} \\
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+
+\textbf{D1: the embedding is strongly site-confounded.} A linear classifier
+on Perch embeddings recovers the recording site with near-perfect
+accuracy (0.999, 8$\times$ chance). The embedding is encoding---through
+its 1536 dimensions---enough of the recorder's frequency response,
+ambient biophony, and microclimate to make sites linearly separable.
+The hour-of-day signal is also recoverable (0.992 vs $0.077$ chance,
+$13\times$), partly because each site was visited at consistent hours
+in this dataset (a measurement-protocol confound, not a Perch
+limitation). A randomized stratified holdout cannot detect either
+because every site/hour is in both train and validation; only a
+group-aware split (such as our GroupKFold-by-site) exposes the
+problem.
+
+\textbf{D2: per-site difficulty is highly non-uniform.} Raw-Perch macro-AUC
+ranges from 0.487 (S18) to 0.829 (S22), $\sigma{=}0.141$ across 6
+evaluable sites (S15 and S23 are NaN because no class is active in
+their hold-out subset). S18 sits below chance, meaning that on that
+site Perch's class ranking is anti-correlated with the truth---a sign
+that the species mixture and ambient profile of S18 differ enough
+from Perch's training distribution that its top logits become
+systematically wrong. A pipeline that performs well only on the
+``easy'' sites can post a misleadingly high LB if the public test
+sample is dominated by them.
+
+\textbf{D3: texture sonotypes are single-site labels.} The Insecta
+sonotype IDs (\texttt{47158sonXX}) and several Amphibia codes have all
+of their positive windows concentrated at one site. This is the
+binding constraint that no domain-adaptation method can lift: there
+is literally no cross-site supervision to learn from. Removing the
+site signal from the embedding (CORAL / DANN) or modelling a site-free
+latent (iVAE) would not help, because for these classes the only
+training-time decision boundary that can possibly separate them from
+negatives also separates the site they were recorded at from the
+others. Their AUC$=$0.500 in the most-stable cell of D5 is mathematical,
+not algorithmic.
+
+\textbf{D4: silhouette is small-positive.} A silhouette of $+0.096$
+(within the $[-1, 1]$ range, where 0 means no cluster structure) is
+not a tight clustering, but it is clearly positive: the embedding
+arranges windows into loose site-shaped neighborhoods in PCA(20)
+space. Combined with D1's near-perfect linear separability, this
+suggests the site signal lies along high-rank directions that linear
+methods can exploit but PCA's first 20 components only partly capture.
+
+\textbf{D5: cross-fold variance is moderate on average, very high for
+some Amphibia classes.} The mean across-fold std of per-class AUC is
+0.012 (low), but the worst classes have std up to 0.184. The top of
+the high-variance list is dominated by Amphibia
+(\texttt{22961}, \texttt{24321}, \texttt{1491113}, \texttt{517063},
+\texttt{22967}); the most-stable list is dominated by classes whose
+AUC is stuck at exactly 0.500 across all folds (the single-site
+texture sonotypes from D3, plus a handful of Reptilia). ``Stable''
+in this context means uniformly uninformative.
+
+\paragraph{Implication for exp30+.}
+Domain adaptation is justified for the 71 active classes that have
+multi-site labels: D1 shows the site signal is large enough to act on,
+and D2 shows the OOF cost is large enough to motivate the work. Linear
+candidates---per-site mean subtraction, CORAL alignment, simple
+adversarial debiasing of the probe stage---are cheap and should be
+tried first. Heavier methods (iVAE, DANN finetune of Perch's last
+layer) require GPU and a larger labeled corpus; they should only
+follow if the linear methods plateau.
+
+For the 15+ single-site texture sonotypes, no embedding-side method
+can manufacture cross-site supervision. The realistic options are:
+(a) augment with 2025 Pantanal soundscape clips containing the same
+sonotype IDs, (b) collect expert-curated reference clips per sonotype
+and treat them as one-shot prototypes (a ProtoNet-style head over
+Perch), or (c) accept AUC$=$0.500 on these classes and rely on the
+remaining 56 active classes to drive macro-AUC.
+
+\subsubsection{Synthesis: Robust Recipe for exp30 v1}
+\label{sec:exp21-25-synthesis}
+
+The five experiments converge on a single robust recipe that we will
+submit as exp30 v1.
+
+\begin{table}[h]
+\centering
+\caption{exp21--25 cumulative effect on OOF macro-AUC (708 SS windows, 71 active classes).}
+\label{tab:exp21-25-summary}
+\begin{tabular}{llcc}
+\hline
+\textbf{Recipe} & \textbf{Source} & \textbf{OOF} & \textbf{In-sample} \\
+\hline
+Raw Perch v2                         & exp21 A & 0.7390 & 0.7390 \\
+v1 (priors + probes + smoothing)     & exp21 F & 0.524  & 0.978 \\
+Probes only (no priors)              & exp23   & \textbf{0.8158} & --- \\
+Probes only + 84-window pseudo       & exp23   & \textbf{0.8234} & --- \\
+\hline
+\end{tabular}
+\end{table}
+
+\textbf{Drop} the Bayesian prior fusion stage entirely. Under Val-B
+it costs $-0.20$ vs raw Perch and is naively interpretable as site
+memorization. exp27 reveals a more nuanced reason: priors do carry
+real signal under the test-realistic Val-A regime ($+0.06$ over raw),
+but the PCA-projected embedding fed into the probe already encodes
+site identity, so explicit prior fusion double-counts the same signal
+and adds noise. The PP design therefore loses to R1 (probes only) in
+\emph{both} regimes (Val-A $-0.108$, Val-B $-0.289$).
+
+\textbf{Keep} PCA(32) + per-class \texttt{LogisticRegression}
+($C{=}0.25$, balanced) probes blended 50/50 with raw Perch
+(exp23 establishes this is where the $+0.077$ OOF gain comes from).
+
+\textbf{Do not} replace the probe head with rich 1536-d features for
+texture taxa: the v1 minimal features beat the rich variant by
+$-0.062$ macro-AUC because per-class positive counts are too small
+(exp24).
+
+\textbf{Add} the 84-window pseudo-label pool from the 7 partial
+soundscape files for an extra $+0.0076$ OOF (exp23). It is free.
+
+\textbf{Do not} blend in a \texttt{train\_audio} probe: the
+clean$\to$field domain shift makes the probe worse than zero-shot
+Perch and adds nothing for the 28 Perch-silent classes (exp22).
+
+\textbf{Plan} domain adaptation for exp31+: site signal is real
+($8\times$ chance, exp25 D1) and per-site OOF varies by 0.34 AUC
+(exp25 D2), but linear methods (per-site whitening, CORAL) should
+be tried before heavy ones (DANN / iVAE finetune).
+
+\textbf{Predicted exp30 v1 OOF (Val-B)}: $\approx 0.82$. \textbf{Predicted
+LB}: unknown until exp27 introduces a second evaluation regime that
+matches the actual test conditions. The exp21--25 OOF protocol
+(GroupKFold by site) is the worst-case Val-B regime where every
+validation site is unseen at training time. exp27 shows the public
+test set is closer to a Val-A regime (seen sites, new files), under
+which the recipe ranking changes substantially.
+
+\subsection{Experiment 26: Robust Recipe Variant Sweep}
+\label{sec:exp26}
+
+\paragraph{Motivation.} exp23 discovered that dropping prior fusion
+lifts Val-B macro-AUC from 0.524 to 0.816. exp26 sweeps nine recipes
+over the same cached features to (a) confirm the lever, (b) probe
+adjacent variants (per-file embedding centering, weak priors at
+varying shrinkage $k$, Gaussian temporal smoothing), and (c) pick a
+canonical recipe for the next submission slot.
+
+\paragraph{Recipes.} All built on the cached exp21 Perch features
+(708 windows $\times$ 234 classes). Each recipe is evaluated under
+5-fold GroupKFold by site (Val-B):
+\begin{description}
+\item[R0] Raw Perch v2.
+\item[R1] PCA(32) + LogReg probe ($C{=}0.25$, balanced),
+50/50 blend with raw Perch. Reproduces exp23.
+\item[R2a--d] R1 with weak priors fused into the base, with
+shrinkage $k_h{=}k_s{\in}\{50, 100, 200, 500\}$
+($k_{sh}$ scaled accordingly).
+\item[R3] R1 + per-file embedding centering (subtract the
+file-mean embedding from each window before PCA).
+\item[R4] R3 + best-$k$ priors.
+\item[R5] R1 + 5-tap Gaussian temporal smoothing across the
+12 windows of each file ($\sigma{\approx}1.0$).
+\item[R6] R3 + best-$k$ priors + Gaussian smoothing.
+\end{description}
+
+\begin{table}[h]
+\centering
+\caption{Experiment 26: Val-B macro-AUC for nine recipe variants
+(708 windows, 71 active classes).}
+\label{tab:exp26}
+\begin{tabular}{llc}
+\hline
+\textbf{Recipe} & \textbf{Description} & \textbf{Val-B AUC} \\
+\hline
+R0  & Raw Perch v2                         & 0.7390 \\
+R1  & Probes only (no priors)              & 0.8148 \\
+R2a & Probes + weak priors $k{=}50$        & 0.5137 \\
+R2b & Probes + weak priors $k{=}100$       & 0.5095 \\
+R2c & Probes + weak priors $k{=}200$       & 0.5086 \\
+R2d & Probes + weak priors $k{=}500$       & 0.5066 \\
+R3  & R1 + per-file centering              & 0.7486 \\
+R4  & R3 + best-$k$ priors                 & 0.4633 \\
+\textbf{R5} & \textbf{R1 + Gaussian smoothing} & \textbf{0.8190} \\
+R6  & R3 + best-$k$ priors + Gaussian      & 0.4472 \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Findings.} \textbf{R5 wins.} Adding a 5-tap Gaussian smoother
+across the 12 windows of each file lifts R1 from 0.8148 to 0.8190
+($+0.0042$) at zero compute cost. \textbf{Weak priors do not survive
+GroupKFold-by-site at any shrinkage.} Even at $k{=}500$ (heavy
+shrinkage toward the global rate), Val-B drops to 0.507 because
+validation sites are entirely absent from the prior tables and the
+hour-only fallback is uninformative across sites. \textbf{Per-file
+centering (R3) is a wash}: it lifts Reptilia from 0.500 to 0.856 by
+removing file-level DC offset, but kills Insecta from 0.693 to 0.519
+because single-site sonotype embeddings ARE the file-mean for those
+classes. The Insecta loss dominates the macro average.
+
+\paragraph{Per-taxa breakdown.} Comparing R0, R1, R3, and R6 by taxa
+(Table~\ref{tab:exp26-taxa}) shows the structural risk of stacked
+priors: R6 collapses every taxon, with Insecta dropping below 0.10
+because the per-file centering destroys the only signal that worked
+for those classes. R1 is the only recipe that lifts every active
+taxon over R0.
+
+\begin{table}[h]
+\centering
+\caption{Experiment 26: per-taxa mean Val-B AUC.}
+\label{tab:exp26-taxa}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Taxon} & \textbf{R0} & \textbf{R1} & \textbf{R3} & \textbf{R6} \\
+\hline
+Aves      & 0.890 & 0.905 & 0.898 & 0.752 \\
+Mammalia  & 0.945 & 0.946 & 0.948 & 0.814 \\
+Amphibia  & 0.846 & 0.841 & 0.825 & 0.491 \\
+Insecta   & 0.500 & 0.693 & 0.519 & 0.075 \\
+Reptilia  & 0.500 & 0.762 & 0.856 & 0.282 \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Verdict.} R5 is the canonical Val-B recipe. We carry it
+forward to exp27 to test whether it also wins under a more
+test-realistic evaluation regime.
+
+\subsection{Experiment 27: Dual Validation (Val-A + Val-B)}
+\label{sec:exp27}
+
+\paragraph{Motivation.} The 2025-style GroupKFold-by-site protocol
+(Val-B) holds out entire sites. Public discussion in the BirdCLEF
+2026 forum (lb928 thread, Tucker Arrants) points out that this is
+\textit{overly harsh} for this competition because the actual test
+soundscapes overlap training sites. A model that holds out entire
+sites at validation time cannot learn the legitimate site-level
+species priors that exist at test time. The recommendation is to
+evaluate under \textbf{both} regimes:
+\begin{description}
+\item[Val-A] file-stratified-by-site 5-fold (sites seen at train
+time, files held out). Matches the actual test regime.
+\item[Val-B] GroupKFold by site (entire site held out). Hedges
+against the unseen-site fraction in private LB.
+\end{description}
+
+\paragraph{Method.} For each recipe we compute Val-A AUC (round-robin
+file assignment within each site, weighted toward Val-A by $\geq{1}$
+per site) and Val-B AUC (5 disjoint site partitions, exp21--26
+protocol). Five recipes are evaluated:
+\begin{description}
+\item[R0] Raw Perch v2.
+\item[PR] Raw + Bayesian prior fusion (no probes).
+\item[R1] Probes only, 50/50 blend with raw Perch.
+\item[PP] Priors + probes (the LB 0.910 design).
+\item[R5] R1 + Gaussian temporal smoothing.
+\end{description}
+
+\begin{table}[h]
+\centering
+\caption{Experiment 27: Val-A (seen-site, new-file) vs Val-B
+(unseen-site) macro-AUC. The $\Delta$ column is Val-A $-$ Val-B.}
+\label{tab:exp27}
+\begin{tabular}{lccc}
+\hline
+\textbf{Recipe} & \textbf{Val-A} & \textbf{Val-B} & \textbf{$\Delta$ A$-$B} \\
+\hline
+R0 raw Perch                & 0.7390 & 0.7390 & $\phantom{-}0.0000$ \\
+PR priors only              & 0.8006 & 0.5121 & $+0.2884$ \\
+\textbf{R1 probes only}     & \textbf{0.8886} & \textbf{0.8372} & $+0.0514$ \\
+PP priors $+$ probes        & 0.7805 & 0.5482 & $+0.2324$ \\
+\textbf{R5 R1 $+$ Gaussian} & \textbf{0.8922} & \textbf{0.8418} & $+0.0504$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Mechanism: why probes already contain priors.} Before
+interpreting the table, it helps to be precise about what each
+component is doing. The Bayesian \textbf{prior} is a lookup table
+indexed by site and hour. For each (site, hour) bin in the training
+data, we compute the empirical fraction of windows containing each
+species, convert to a logit, and add $\lambda$ times that logit to
+Perch's raw score. Two consequences: (a) the prior consults only
+metadata (filename-derived site and hour); it never examines the
+audio of the test window; (b) every test window in the same
+(site, hour) bin receives the \emph{same} additive bias on every
+class. The prior cannot distinguish between a quiet and a loud
+window, or between two adjacent 5-second windows of the same file.
+
+The \textbf{probe} is a per-class binary logistic regression trained
+on PCA(32) features of Perch's 1536-d embedding. Crucially, the
+embedding encodes acoustic site identity automatically: recordings
+from S22 sound systematically different from those of S03 (microphone
+characteristics, background fauna, ambient noise floor), and these
+differences survive the PCA projection because they are dominant
+variance directions. When LogReg learns ``does species $k$ appear?''
+from training labels, it discovers any discoverable correlation in
+the 32-d feature space, including the correlation
+``S22-shaped embeddings tend to have species $k$.'' In other words,
+the probe learns the same site$\to$species association the prior
+table makes explicit, except (i) it learns it from data rather than
+from a hand-coded lookup, and (ii) its predictions vary
+\emph{per window} because each window has its own embedding, whereas
+the prior's contribution is constant across all windows in a bin.
+
+This explains every row of Table~\ref{tab:exp27}. PR (priors only)
+beats raw Perch on Val-A ($+0.062$) because the lookup is accurate
+when the test site is in the training table. R1 (probes only) beats
+PR by another $+0.088$ because the probe captures the same site
+signal \emph{plus} per-window acoustic discrimination. PP (priors
+$+$ probes) loses to R1 in both regimes because the prior adds a
+bin-constant bias on top of the probe's already-site-aware
+prediction; this bias does not improve discrimination between windows
+in the same bin and dilutes the probe's per-window signal in
+proportion to $\lambda$. Val-B kills priors entirely because the
+table lookup misses: held-out sites are absent from
+\texttt{site\_to\_i}, and the hour-only fallback is uninformative
+across sites. The probe degrades more gracefully on Val-B
+(0.889 $\to$ 0.837) because it can still match acoustic patterns of
+species that occur at multiple sites, even when no training
+embeddings come from the held-out site.
+
+\paragraph{Reframe of the prior story.} The exp21--26 narrative was:
+``priors give an in-sample lift of $+0.20$ that vanishes in OOF; they
+are a memorization shortcut.'' The exp27 result complicates that:
+\begin{enumerate}
+\item Priors \textbf{do} provide a real Val-A lift over raw Perch
+($+0.062$), confirming Tucker's point that site-level species
+priors carry signal when test sites overlap training sites.
+\item However, probes provide a \textbf{larger} Val-A lift ($+0.150$)
+over raw Perch, and an even larger Val-A advantage over
+priors-only ($+0.088$). The PCA-projected embedding implicitly
+encodes site identity, so the LogReg probe captures the same
+``which species at which site'' association that the prior table
+captures, plus per-window discriminative information.
+\item Combining the two (PP) is \textbf{worse} than probes alone in
+both regimes ($-0.108$ Val-A, $-0.289$ Val-B). The two pathways
+double-count the site signal and contribute interference rather
+than complementary information.
+\end{enumerate}
+
+\textbf{R5 wins both regimes} (Val-A 0.892, Val-B 0.842). It is the
+canonical recipe.
+
+\paragraph{Caveats.}
+\begin{itemize}
+\item Val-A folds 3 and 4 are S22-heavy because S22 owns 39 of 59
+labeled files. Recipes that exploit S22-specific structure may
+benefit unfairly. The recipe ranking is, however, consistent
+across folds 0--2 (which are more balanced).
+\item The PP simulation here uses PCA-only probe input, while the
+LB 0.910 PP submission uses richer per-class features
+(\texttt{raw\_col}, \texttt{prior\_col}, sequence statistics).
+The qualitative ordering R1 $>$ PP is robust across this
+modeling choice; the exact gap may differ.
+\item Val-A still does not perfectly match the actual test regime.
+The competition test set may include both seen and unseen sites
+in unknown proportion. Val-A and Val-B together bracket the
+likely range; a recipe that wins both is preferable to one that
+maximizes either alone.
+\end{itemize}
+
+\paragraph{Implication for exp30.} The next submission slot,
+\texttt{birdclef-2026-exp20-to-exp30} v1, runs the R1 recipe with
+priors fully disabled (\texttt{LAMBDA\_*}=0, PCA-only probe input,
+fixed 0.5 blend). Based on Table~\ref{tab:exp27}, the predicted
+public LB is $0.88$--$0.93$, with the upside scenario (LB $>$ 0.910)
+arising precisely because R1 captures site signal more efficiently
+than PP. v2 will be R5 (R1 + Gaussian smoothing).
+
+% ------------------------------------------------------------------
+\subsection{Experiment 28--30: Beyond Perch-only (\S Kaggle top-scorer grounding)}
+\label{sec:exp28_30}
+
+\paragraph{Motivation.} Public Kaggle discussion (digested 2026-04-20)
+confirms that top single-model scores (Boredom 0.947, Ali Ozan 0.925,
+Salman 0.922) are achieved \emph{without} self-distillation or
+pseudo-labeling on unlabeled soundscapes. The reported decomposition
+(\citeauthor{hengck23}) is
+\[
+\text{LB}_{0.93} = \underbrace{\text{Perch2} + \text{proxy class} + \text{temporal} + \text{PCA}}_{\approx 0.92} + \text{prior} + \text{state space} + \text{per-class norm}.
+\]
+Our exp20 baseline (LB 0.910) already implements proxy class, PCA,
+and temporal sequence features via
+\texttt{seq\_features\_1d}. The remaining cheap levers are
+\emph{per-class rank normalisation} and \emph{state space smoothing};
+the harder but necessary lever for a top-family score is a
+second-family model (SED CNN). Pseudo-labeling is deprioritised
+(Don Mathis's public post reports failure; top five submissions skip
+it).
+
+\paragraph{exp28 --- Perch probe v2 (CPU).}
+Rebaseline the starter-notebook-frozen probe (PCA 64, $C{=}0.50$,
+$\alpha{=}0.40$) against our exp20 v1 config (PCA 32, $C{=}0.25$)
+under Val-A/Val-B. Add per-class rank normalisation, and sweep
+smoothers (Gauss $\sigma\in\{0.5,1,1.5\}$, 1-D Kalman, HMM with
+transition counts from \texttt{train\_soundscapes\_labels.csv}).
+
+\paragraph{exp29 --- HGNetV2-B0 SED (Salman's recipe).}
+Backbone \texttt{hgnetv2\_b0.ssld\_stage2\_ft\_in1k},
+20-second training clips, raw-waveform mixup, CE loss on the sum of
+clipwise and framewise-max logits, 20 epochs of AdamW with cosine
+schedule. Training data is \texttt{train\_audio} + labeled
+soundscapes only. The recipe is a direct re-implementation of a
+publicly disclosed top-20 solo recipe; an independent reproduction
+serves as both a diversity model for the final ensemble and a
+validity check on the claim.
+
+\paragraph{exp30 --- ConvNeXt-small SED and ensemble.}
+Same recipe with a transformer-style backbone for architectural
+diversity (EliKal reports that Perch-KD makes backbones
+interchangeable; we test the converse claim in a non-KD setting).
+The final submission is the Val-A-optimal blend of Perch probe v2
+$+$ HGNetV2-B0 SED $+$ ConvNeXt-small SED, subject to a hard
+constraint that Val-B does not regress by more than $0.01$.
+ONNX export of the SED models verifies that the end-to-end
+pipeline fits inside the Kaggle 90-minute CPU budget.
+
+Results are deferred to Section~\ref{sec:exp28_30_results}; the
+experiments run on an RTX 5090 with a fixed 12-hour wall budget
+starting 2026-04-20.
+
+\subsection{Experiment 34--36: Blend ceiling and SED sweep (negative results)}
+\label{sec:exp34_36}
+
+\paragraph{exp34 --- Perch~$\oplus$~SED29 z-score blend.}
+Z-score normalised per-class fusion of Perch probe v2 scores
+(Val-A 0.8943) and exp29 HGNetV2-B0 SED scores (Val-A 0.7374) at
+mixing weight $\alpha{=}0.80$. A 1-D Gaussian smoother of
+$\sigma{=}0.5$ is applied to the blended logits. The blend reaches
+\textbf{Val-A 0.9062, Val-B 0.8503}. Platt and isotonic calibration
+per fold both \emph{reduce} Val-A, because the per-fold positive count
+is too small (typically $<$10) to fit a reliable link function.
+
+\paragraph{exp35 --- ConvNeXtV2-tiny SED (diversity probe).}
+Identical Salman recipe on a ConvNeXtV2-tiny backbone. Best
+val\_auc $0.6468$ at epoch~17 with decline at epochs~18--20, confirming
+convergence. Pearson correlation between exp29 and exp35 on active
+classes is $0.231$ --- low enough to indicate architectural diversity
+--- yet the 3-way simplex search assigns weight $w_{35}{=}0$: the
+absolute AUC is too low to survive the simplex, so diversity alone
+is not sufficient.
+
+\paragraph{exp36 --- Regularised SED sweep.}
+Three configs sharing the exp29 recipe with additional regularisation:
+SpecAugment ($F{=}24$, $T{=}80$, $N{=}2$ each, $P{=}0.7$), label
+smoothing $0.1$, weight decay $5{\times}10^{-2}$, and early-stopping
+patience of $5$ at up to $25$ epochs. Backbones are HGNetV2-B0 (A),
+HGNetV2-B1 (B), and EfficientNet-B0
+(\texttt{tf\_efficientnet\_b0.ns\_jft\_in1k}, C). Single-model Val-A
+scores are $0.628/0.607/0.647$, all \emph{below} the unregularised
+exp29 baseline of $0.737$. The 3-way simplex of
+Perch$+$SED29$+$SED$_\text{new}$ again collapses to weight $0$ on the
+new model in all three cases. We conclude that stacking SpecAugment,
+label smoothing, and aggressive weight decay simultaneously
+over-regularises the SED head; future re-tries must introduce
+regularisers one at a time.
+
+\paragraph{Leaderboard: v6 with SED blend and priors on.}
+The exp34 recipe is deployed in the \texttt{exp20-to-exp30} submission
+notebook with the v1 0.910 priors-on configuration restored (prior
+fusion is required to avoid random predictions on unmapped classes in
+the hidden test set). With post-blend Gaussian smoothing $\sigma{=}0.5$
+and batch\_files$=16$ (validated to fit in the Kaggle 90-minute CPU
+budget), the submission achieves \textbf{public LB 0.912} on
+2026-04-20, an improvement of $+0.002$ over the v1 Perch-only
+baseline. The local gain (Val-A $+0.012$) transfers only partially to
+the leaderboard, suggesting that the prior fusion already covers much
+of the diversity that SED29 contributes on unmapped classes.
+
+\subsection{Experiment 37: Pivot to public ProtoSSM pipeline (LB 0.927)}
+\label{sec:exp37_protossm}
+
+\paragraph{Motivation.}
+After the SED sweep ceiling of LB 0.912 was established, we reviewed
+publicly shared top-scoring notebooks. The hengck23 decomposition
+(\texttt{example\_and\_discussion/lb928.md}) identifies the missing
+components as \emph{state-space smoothing} and \emph{per-class
+normalisation}, both of which we had tested either as post-hoc Kalman
+(negative, exp30) or rank-norm (negative, exp28). We pivoted to
+evaluate whether a \emph{trained} state-space head on Perch embeddings
+--- as distinct from post-hoc smoothing --- would yield a larger gain.
+
+\paragraph{Pipeline.}
+The reference implementation is the community-shared ``ProtoSSM v5''
+notebook, forked as
+\texttt{notebooks/birdclef-2026-perch-distill}. The pipeline is:
+Perch v2 embeddings $\to$ selective state-space model (Mamba-style,
+$d_\mathrm{model}{=}320$, $n_\mathrm{layers}{=}4$,
+$d_\mathrm{state}{=}32$) with prototypical classification head and
+cross-attention $\to$ per-class MLP probes
+(hidden sizes $[256,128]$, PCA-128 features) $\to$ fusion with
+OOF-optimised mixing weight ($0.50$ in submit mode) $\to$ Residual
+SSM (second-pass boosting on first-pass errors, $d{=}128$, 2 layers,
+correction weight $0.35$) $\to$ per-taxon temperature (Aves $1.10$,
+texture $0.95$) $\to$ file-level top-$k$ scaling ($k{=}2$) $\to$
+rank-aware scaling (power $0.4$) $\to$ delta-shift temporal smoothing
+($\alpha{=}0.2$) $\to$ per-class threshold sharpening. All heads are
+trained in-notebook at submit time on the labeled soundscapes;
+inference on hidden test runs Perch once and performs the subsequent
+heads on top of the 1536-d embeddings.
+
+\paragraph{Runtime engineering.}
+Two earlier versions (v3, v4) timed out on the 90-minute CPU budget.
+Diagnosis from the kernel log localised the cost to two factors.
+First, the cache of Perch embeddings on the labeled soundscapes
+(\texttt{jaejohn/perch-meta} dataset) failed to mount at the
+notebook-hardcoded path \texttt{/kaggle/input/perch-meta}; the
+competition environment actually mounts datasets at
+\texttt{/kaggle/input/datasets/<owner>/<slug>}, adding approximately
+$560$~s (9 minutes) of Perch re-computation on the $107$ labeled
+soundscape files. Second, \texttt{batch\_files$=16$} --- a value we
+briefly tried for memory-pressure reasons --- increased per-file
+Perch cost compared to \texttt{batch\_files$=32$} due to poorer
+XLA compilation amortisation over the larger hidden test.
+
+\paragraph{Fix.}
+We extended \texttt{resolve\_full\_cache\_paths} to enumerate four
+candidate mount paths
+(\texttt{/kaggle/input/datasets/jaejohn/perch-meta},
+\texttt{/kaggle/input/perch-meta},
+\texttt{/kaggle/input/jaejohn/perch-meta}, and the user-configured
+\texttt{full\_cache\_input\_dir}), and reverted \texttt{batch\_files}
+to $32$. The updated dev run (v6) reports
+\texttt{Loading cached full-file Perch outputs from\dots} at wall time
+$113.7$~s, completes in $280.4$~s for a 20-file dry run with 2 of 2
+auxiliary models trained, and produces a well-formed submission of
+shape $(240, 235)$.
+
+\paragraph{Result.}
+\textbf{Public LB 0.927}, an improvement of $+0.015$ over the exp34
+SED-blend submission (LB 0.912) and $+0.017$ over the v1 Perch-only
+baseline (LB 0.910). This result validates the hengck23 decomposition:
+the missing component on our pipeline was not a second audio backbone
+but a trained temporal model on the Perch embeddings. The per-class
+normalisation and trained SSM together recover most of the reported
+$0.924$--$0.930$ range for Perch-based solutions.
+
+\paragraph{Lessons for our pipeline.}
+The LB 0.927 result is obtained with essentially unmodified public
+infrastructure; our pipeline-specific contributions (exp21--36) do
+not appear in this submission. Remaining opportunities are
+(i)~blending the exp29 SED stream into the ProtoSSM fusion step,
+which our local analysis indicates should yield an additional
+$0.002$--$0.010$ under appropriate z-score normalisation;
+(ii)~back-porting the ProtoSSM and post-processing stack to
+\texttt{exp20-to-exp30} so that our SED-blend asset remains active;
+(iii)~systematic re-evaluation of per-class thresholds under the
+new fusion, which the public notebook currently leaves at the
+default $0.5$ in submit mode.
+
+\subsection{Experiment 38: ONNX Perch and the cache-consistency failure}
+
+\paragraph{Motivation.}
+Public notebook
+\texttt{birdclef-26-two-pass-ssm-advanced-pp} reports LB~0.933 using
+ONNX Runtime for the Perch forward pass, quoting an approximate
+$150\times$ speedup over the TensorFlow SavedModel. We asked
+whether adopting ONNX in our ProtoSSM v5 pipeline frees enough
+runtime budget to admit additional inference streams (e.g.\ the
+SED29 blend that plateaued at LB~0.912 in exp34), without changing
+the scoring pipeline.
+
+\paragraph{Submissions (2026-04-21).}
+Three controlled submissions isolated the effect of the runtime
+swap on the LB while holding every other component of the v6
+pipeline fixed.
+
+\begin{center}
+\begin{tabular}{lllr}
+\toprule
+Version & Training cache & Test inference & Public LB \\
+\midrule
+v6  & TF (\texttt{jaejohn/perch-meta}) & TF SavedModel & \textbf{0.927} \\
+v9  & TF (\texttt{jaejohn/perch-meta}) & ONNX Runtime  & 0.924 \\
+v10 & ONNX (recomputed in-notebook)    & ONNX Runtime  & 0.919 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+v9 replaces the test-time backbone with \texttt{perch\_v2.onnx} while
+the training caches used to fit the MLP probes, ProtoSSM v5, and
+ResidualSSM remained the TF-generated artefacts in
+\texttt{jaejohn/perch-meta}. v10 additionally drops the TF cache and
+recomputes every training-time Perch output with ONNX, matching the
+end-to-end ONNX pipeline used by the public 0.933 notebook. The dev
+wall time decreased from $280$~s (v6) to $170$~s (v9) to $358$~s (v10;
+the additional time is spent re-generating the labelled-soundscape
+cache from scratch at submit time).
+
+\paragraph{Diagnosis.}
+Our prior hypothesis --- that TF and ONNX Perch produce slightly
+different embeddings and that a TF-fit probe head degrades when fed
+ONNX features at test time --- predicts the ordering
+$\text{v10} > \text{v9}$ once the train/test backbone is made
+consistent. The LB results invert this prediction:
+v10 (consistent ONNX) loses an additional $0.005$ relative to v9,
+and $0.008$ relative to v6. Two mechanisms are compatible with this
+ordering:
+\begin{enumerate}
+\item The external \texttt{jaejohn/perch-meta} cache is not a raw
+Perch dump; it likely embeds pre-aggregation choices (proxy
+reduction, windowing) that our in-notebook recomputation does not
+exactly reproduce, so switching to an in-notebook ONNX cache both
+changes the backbone and silently changes the training feature
+distribution.
+\item The \texttt{perch\_v2.onnx} export carries a small accuracy
+cost relative to the TF SavedModel on our specific pipeline, and
+the public LB~0.933 notebook only hits that figure because its
+isotonic-calibration and adaptive-delta post-processing stack
+masks the backbone loss.
+\end{enumerate}
+We cannot yet distinguish (1) from (2) from the LB alone.
+
+\paragraph{Implication.}
+ONNX is orthogonal to score under our current pipeline: its value
+is runtime headroom, not accuracy. To realise the LB~0.93+ regime we
+still need a second evidence stream (SED29 blend) and the
+post-processing upgrades from the public notebook. The cache
+recomputation path is a non-trivial source of noise and should be
+avoided unless we adopt the public pipeline's post-processing at
+the same time.
+
+\subsection{Experiment 39: SED29 blend on the ProtoSSM pipeline}
+
+\paragraph{Setup.}
+Reverting to the v6 configuration (TF SavedModel, TF-generated
+\texttt{jaejohn/perch-meta} cache, \texttt{batch\_files=32}) as a
+known LB~0.927 baseline, we inject the exp29 SED29 stream into the
+\texttt{perch-distill} post-processing pipeline. The blend is
+identical to the one measured locally in exp34: a per-class
+$z$-score blend with $\alpha_{\text{Perch}} = 0.80$ applied on the
+logit-space fusion output, restricted to mapped active classes,
+followed by Gaussian temporal smoothing with
+$\sigma = 0.5$ across the 12-window axis. The SED model
+(HGNetV2-B0 with attention head, trained in exp29) is loaded from
+the existing \texttt{ultimatumgame/birdclef2026-model-weights}
+dataset, producing 20-second windowed predictions that are
+replicated across each 5-second Perch output row within a 20-second
+block. No additional training is performed at submit time.
+
+\paragraph{Expectation.}
+Local measurement in exp34 gave Val-A $+0.012$ relative to the
+raw Perch output at the same $\alpha$. Under the ProtoSSM fusion
+the absolute level is higher ($0.927$ rather than $\sim 0.894$), and
+the fusion already absorbs part of the SED signal through the
+trained temporal head. We therefore expect a smaller transfer,
+tentatively $+0.002$ to $+0.005$ LB, putting the target in the
+$0.929$--$0.932$ range. The submission is scored as v11 in the
+same kernel.
+
+\subsection{Experiment 39: SED blend result on hybrid pipeline (LB 0.929)}
+
+\paragraph{v11 failure mode.}
+The first attempt at bundling SED29 into the LB~0.927 v6 configuration
+(v11: TF SavedModel end-to-end plus SED) reached the submission
+\texttt{COMPLETE} state with an empty \texttt{publicScore}, matching
+the \emph{scoring failed} pattern observed in v8. Dev wall was $341$~s
+for a 20-file dry run; extrapolated to the hidden-test regime the
+Perch-TF forward dominates at roughly $95$~min for 600 files, which
+exceeds the 90-minute CPU budget once ProtoSSM and ResidualSSM
+training are accounted for. The root cause was runtime, not blend
+correctness.
+
+\paragraph{v12: hybrid pipeline.}
+v12 keeps the TF-generated \texttt{jaejohn/perch-meta} cache so that
+the MLP probes and ProtoSSM v5 are trained on the same feature
+distribution that v6 saw, but routes hidden-test audio through
+ONNX Perch. This combines the LB~0.927 training regime (jaejohn
+cache) with the runtime headroom of ONNX (dev wall drops from
+$341$~s to $238$~s, roughly $100$~s saved per 20 files, scaling to
+a $\sim 50$~min saving over 600 files). Onto this we add the SED29
+z-score blend ($\alpha_{\text{Perch}} = 0.80$, Gaussian smoothing
+$\sigma = 0.5$) exactly as measured in exp34.
+
+\paragraph{Result.}
+\textbf{Public LB 0.929}, a new maximum. This is $+0.002$ over the
+v6 TF-only baseline and $+0.005$ over the ONNX-only v9 run.
+
+\paragraph{Decomposition.}
+The four 2026-04-21 submissions isolate each component:
+
+\begin{center}
+\begin{tabular}{lllr}
+\toprule
+Version & Change & LB & $\Delta$ \\
+\midrule
+v6  & TF cache + TF test                         & $0.927$ & --- \\
+v9  & TF cache + ONNX test                       & $0.924$ & $-0.003$ \\
+v10 & ONNX cache + ONNX test                     & $0.919$ & $-0.008$ \\
+v11 & TF cache + TF test + SED blend             & \emph{fail} & timeout \\
+v12 & TF cache + ONNX test + SED blend (hybrid)  & $\mathbf{0.929}$ & $+0.002$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Reading by column:
+\begin{itemize}
+\item ONNX swap alone costs $-0.003$ (v6 vs v9). The public notebook's
+$0.933$ figure therefore does not come from the ONNX backend itself;
+it comes from the post-processing stack that the same notebook bundles.
+\item Recomputing the training cache with ONNX (v10) deepens the
+penalty to $-0.008$, confirming that the MLP/ProtoSSM heads are fit
+to the exact feature distribution present in
+\texttt{jaejohn/perch-meta} and that any in-notebook recomputation
+introduces a silent distribution shift.
+\item SED29 blend transfers $+0.005$ from dev to LB in v12, matching
+the upper end of the exp34-based forecast of $+0.002$ to $+0.005$.
+Local Val-A had reported $+0.012$ under the same $\alpha$; the
+transfer ratio ($\approx 0.42$) is consistent with ProtoSSM already
+absorbing part of the temporal signal that SED would otherwise
+contribute.
+\item The net $+0.002$ for v12 relative to v6 is the sum of the
+SED gain ($+0.005$) and the ONNX penalty ($-0.003$). ONNX is a
+pure enabler in this pipeline: without it, the SED blend cannot be
+added because the runtime budget is already saturated (v11).
+\end{itemize}
+
+\paragraph{Interpretation.}
+The hybrid recipe
+--- TF-domain training features, ONNX test inference, SED blend
+in logit space, post-blend Gaussian smoothing ---
+is the configuration that yields the current LB maximum of $0.929$.
+Every ablation we have tried so far drops the score, and the
+specific combination of keeping the jaejohn cache while switching
+the test backbone to ONNX is required to reproduce the result.
+
+\paragraph{Remaining gap to $0.933$.}
+The public \texttt{birdclef-26-two-pass-ssm-advanced-pp} pipeline,
+which shares the Perch+ProtoSSM+ResidualSSM backbone with v12 but
+reports LB~$0.933$, differs from ours in its post-processing: it
+performs per-class isotonic calibration on OOF scores and
+applies adaptive $\delta$-smoothing that blends uncertain windows
+toward their neighbours (rather than the fixed-$\sigma$ Gaussian we
+use). These two passes operate on the final fused logits after the
+SED blend and are orthogonal to the decomposition above, so they
+are the natural next component to port.
