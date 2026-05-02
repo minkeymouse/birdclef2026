@@ -1,69 +1,138 @@
-# Experiments — Index (refactored 2026-04-26)
+# Experiments — Index (refreshed 2026-05-02)
 
 ```
 experiments/
-├── _data_pipelines/      production scripts + caches the LB pipeline depends on
-├── _audits_post_v26/     live diagnostic experiments + shared `_lib/`
-├── _eval_harness/        11-file Val-A_v2 evaluation
-├── _archive_2026_audits/ completed audits (paper-recorded, kept for reference)
-├── _archive_2026_pre_v26/  pre-v26 work
-├── _archive_2025/        2025 CNN-era code
-├── _deprecated/          early collapsed attempts
-└── _scratch_logs/        run logs from scripts/run_exp.sh
+├── _data_pipelines/          production scripts + caches the LB pipeline depends on
+│   └── _shared/              SED training library (audio, augment, model, train)
+├── _audits_post_v26/         live diagnostic experiments + shared `_lib/`
+├── _eval_harness/            11-file Val-A_v2 evaluation
+├── _archive_2026_audits/     completed audits (paper-recorded, kept for reference)
+│   └── post_v26/             exp79–101 audits archived after v33 (April 2026)
+├── _archive_2026_dpo_dead_end/  exp104–117 RL/DPO variants, all ≤ BCE on LOSO
+├── _archive_2026_pre_v26/    pre-v26 work
+├── _archive_2025/            2025 CNN-era code
+├── _deprecated/              early collapsed attempts
+└── _scratch_logs/            run logs from scripts/run_exp.sh
 ```
 
 ## Running experiments
 
-`scripts/run_exp.sh <python_script>` is the standard entry point. It:
+`scripts/run_exp.sh <python_script>` is the standard entry point:
 - forces `python -u` (unbuffered)
 - tees to `experiments/_scratch_logs/<name>_<ts>.log`
 - writes a `.pid` file next to the log so a Monitor can poll cleanly
 
 ```bash
-scripts/run_exp.sh experiments/_audits_post_v26/exp80a_site_holdout.py
-# log path is printed first; tail it.
+scripts/run_exp.sh experiments/_data_pipelines/exp50_exp47_with_2025bg.py
 ```
 
-For background + Monitor:
-```bash
-scripts/run_exp.sh experiments/.../exp80a.py &
-# Monitor:
-#   until [ ! -f <log>.pid ]; do sleep 30; done; tail -50 <log>
-```
+Avoids the bash-pipe-buffer pitfall where `uv run python ... 2>&1 | tail -50` hides progress until process exit.
 
-This avoids the bash-pipe-buffer pitfall where
-`uv run python ... 2>&1 | tail -50` hides progress until process exit.
+## `_data_pipelines/`
 
-## `_data_pipelines/` — production
+Scripts that build artifacts loaded by the Kaggle inference notebook (`notebooks/birdclef-2026-perch-distill/`). Caches large, gitignored.
 
-These scripts build artifacts the Kaggle inference notebook (`notebooks/birdclef-2026-perch-distill/`) loads. Caches are large and not in git.
+### Active in v33 production (LB 0.932 → reset 0.917)
 
 | Script | Purpose | Output |
 |---|---|---|
-| `exp43a_extract_perch_gpu.py` | Perch v2 ONNX-GPU emb + score on 10,658 unlabeled SS | `exp43a_outputs/perch_ss_all.npz` (825 MB) |
-| `exp45a_hierarchical_head.py` | V9 5-way taxon gate on Perch emb (used in v20-v33) | `model-weights/exp45a_taxon_head.pt` |
-| `exp49a_extract_2025_quiet_bg.py` | 11,920 quiet 5-sec windows from 2025 SS for site-invariance BG mix | `exp49_outputs/` (6.8 GB) |
-| `exp49b_extract_2025_train_audio_perch.py` | Perch on 2025 train_audio | `exp49_outputs/` |
-| `exp50_exp47_with_2025bg.py` | **Active SED in v24-v33 (LB 0.931+)** — Boredom recipe + 2025 BG | `model-weights/exp50_hgnet_sed.pt` |
-| `exp51_27head_with_2025bg.py` | 27-class dedicated head (sonotypes + 2 Amphibia) + 2025 BG | `model-weights/exp51_27head_sed.pt` |
-| `exp76_ivae_raw_mel.py` | Build pooled mel cache for 739 labeled SS rows | `exp76_outputs/mel_cache.npz` |
-| `exp78_save_ivae_artifacts.py` | Train iVAE encoder + save (used in v34, regressed) | `model-weights/ivae_*.{pt,npz}` |
-| `exp71_external_download.py` | xeno-canto / iNat clip download (partial) | `exp73_outputs/` |
-| `exp73_finetune_with_external.py` | SED fine-tune with external clips (WIP) | |
-| `exp49_50_51_driver.sh` | Convenience driver to retrain exp50/51 | |
+| `exp43a_extract_perch_gpu.py` | Perch v2 ONNX-GPU emb + scores on 10,658 unlabeled SS | `exp43a_outputs/perch_ss_all.npz` |
+| `exp45a_hierarchical_head.py` | V9 5-way taxon gate on Perch emb | `model-weights/exp45a_taxon_head.pt` |
+| `exp49a_extract_2025_quiet_bg.py` | 11,920 quiet 5-sec windows from 2025 SS for site-invariance BG mix | `exp49_outputs/bg_quiet_2025.npz` (6.6 GB) |
+| `exp49b_extract_2025_train_audio_perch.py` | Perch on 2025 train_audio (41 overlap species) | `exp49_outputs/train_audio_2025_perch.npz` |
+| `exp50_exp47_with_2025bg.py` | **Active SED in v24–v33** — Boredom recipe + 2025 BG mixing | `model-weights/exp50_hgnet_sed.pt` |
 
-## `_audits_post_v26/` — live audits
+### LB-tested teachers (kept for blend audits)
 
-After v26 (LB 0.931). Currently around iVAE/Perch disagreement signal investigation (definitively negative — see `paper/exp_current.tex` exp79–80 section).
+| Script | LB role | Output |
+|---|---|---|
+| `exp51_27head_with_2025bg.py` | 27-class sonotype head — v18/v19/v28 (regressed) | `model-weights/exp51_27head_sed.pt` |
+| `exp76_ivae_raw_mel.py` + `exp78_save_ivae_artifacts.py` | mel-iVAE for v34 (regressed) | `model-weights/ivae_*.pt` |
+| `exp83_q2_focal_sed.py` | Q2 focal SED variant | `exp83_q2_outputs/` |
+| `exp84_q4_external_expand.py` + `exp84b_q4_retrain.py` | iNat external positive supervision — used at W=0.05 in **v48 (+0.002)** | `exp84b_q4_outputs/` |
+| `exp102_save_lr_artifacts.py` | LR FP/FN detectors — v38-v41 (all regressed −0.012 to −0.017) | `model-weights/lr_*_detector.npz` |
+| `exp120_extract_2025_ta.py` | 2025 train_audio Perch cache | `exp120_outputs/ta25_perch.npz` |
+| `exp121_aggressive_synth.py` | Cross-region BG fine-tune — v44 (regressed −0.012) | `model-weights/exp121_aggressive_synth_sed.pt` |
+| `exp123_bird_bias_fix.py` | Surgical bird-bias penalty — v45 (regressed −0.014) | `model-weights/exp123_bird_bias_sed.pt` |
+| `exp136_v3_retrain.py` + `exp136b_v3_simple.py` | v3 pseudo retrain — v46/v47 (−0.018/−0.016) | `model-weights/exp136b_v3_pseudo_sed.pt` |
+| `exp150_v9_targeted_sed.py` | v7 retrain (didn't run, GPU blocked) | — |
+
+### Pseudo-label framework (v0 → v7, mostly dead end)
+
+CLAUDE.md "Pseudo-label work" section explains the circular-distillation problem.
+
+| Script | Stage |
+|---|---|
+| `exp125_exp50_on_unlabeled.py` | exp50 scores on unlabeled SS |
+| `exp126_pseudo_label.py` | v0 pseudo construction |
+| `exp127_pseudo_forensics.py` | v0 audit |
+| `exp128_refine_pseudo.py` | v1 refinement |
+| `exp129_pseudo_retrain.py` | first SED retrain |
+| `exp130_verified_pseudo.py` + `exp130b_verified_v2.py` | v2 verification |
+| `exp131_pseudo_v2_retrain.py` | v2 retrain |
+| `exp132_pseudo_masked.py` | masked variant |
+| `exp133_confusion_signatures.py` | confusion-signature mapping |
+| `exp134_sonotype_pseudo.py` | sonotype pseudo |
+| `exp135_systematic_error_filter.py` | error filter |
+| `exp137_fp_fn_filter.py` | FP/FN filter |
+| `exp138_pseudo_audit.py` | audit |
+| `exp139_external_verify.py` | external verify |
+| `exp140_more_external.py` | extended external |
+| `exp142_v7_simple.py` | v7 (deferred — GPU blocked) |
+| `exp147_pseudo_site_strat.py` + `exp147b_pseudo_v8.py` | site-stratified pseudo |
+| `exp149_pseudo_v9_targeted.py` | v9 targeted |
+
+### AudioMAE / DANN / blend audit (all regressed, see `_audiomae_local_audit` memory)
+
+| Script | Purpose |
+|---|---|
+| `exp143_audiomae_probe.py` (+ `b/c/d/e/f/g`) | AudioMAE probe variants — v49 LB 0.910, v50 LB 0.905 |
+| `exp144_full_diagnostic.py` | full diagnostic |
+| `exp145_problem_setting.py` | problem-setting audit |
+| `exp146_dann_probe.py` (+ `b/c`) | DANN site-adversarial probe |
+| `exp148_blend_normalisation.py` | blend normalization |
+| `exp151_save_rank_quantiles.py` | rank-quantile artifact for Kaggle |
+| `exp152_save_m5_probe.py` | M5 MLP probe save |
+| `exp153_stacking.py` | LightGBM per-class stacking |
+
+### Synthetic-data exploration (NEW, 2026-05-02)
+
+DRASDIC (Hoffman 2025) + Soltero (2025) inspired. Goal: site decoupling via multi-region BG diversification.
+
+| Script | Status | Note |
+|---|---|---|
+| `exp154_synth_bg_diagnostic.py` | ✓ ran | 360 train_audio → 560 windows, 12 buckets, **PSD diversity +38% vs Pantanal pool**. Feasibility confirmed. |
+| `exp155_synth_bg_mine_full.py` | deferred | Full extraction (~15 min CPU, ~24 GB). Awaiting go-ahead. Extrapolated ~43k mineable BG windows (3.6× current). |
+| `exp156_synth_bg_perch_qc.py` | deferred | Perch top-1 prob < 0.05 filter. Needs Perch ONNX (`/tmp/perch_v2.onnx`). |
+
+### `_shared/` (used by exp50 / exp51 / exp84b / exp121 / exp136b / etc.)
+
+SED training library:
+
+| Module | Exports |
+|---|---|
+| `audio.py` | mel-spec frontend (32 kHz, n_mels=128, fmin=50, fmax=14000) |
+| `augment.py` | `aggressive_mixup` — per-row BG mix + mixup. Aves p=0.5, non-Aves p=0.85, alpha [0.3, 0.7] |
+| `constants.py` | SR=32000, CLIP_SEC=20, WINDOW_SEC=5, N_CLS=234, BACKBONE="hgnetv2_b0..." |
+| `data.py` / `data_v3.py` | dataset construction + label encoding |
+| `model.py` | HGNet-B0 SED head |
+| `train.py` | training loop |
+
+## `_audits_post_v26/`
+
+Live diagnostic experiments after v33 production. Most pre-v33 audits archived to `_archive_2026_audits/post_v26/`.
 
 ```
 _audits_post_v26/
-├── _lib/                       shared utility module
-├── exp80a_site_holdout.py      site holdout — confirms iVAE Insecta is site fingerprint
-├── exp80b_bigpool_ivae.py      30k-pool iVAE — partial improvements only
-├── exp80c_taxon_classifier.py  LOSO site CV — same conclusion
-├── exp79_outputs/              unlabeled probe + audit candidates
-└── exp80_outputs/              bigpool ckpt, perch_emb_labeled cache, site holdout result
+├── _lib/                              shared utility module
+├── exp103_perch_head_finetune.py      P_NEW: Perch backbone frozen + 234-class head fine-tune
+├── exp106_pnew_hybrid.py              Perch-init linear + correction MLP
+├── exp108_failure_forensics.py        FN/FP analysis on 122 SS eval rows
+├── exp121b_score_eval.py              score exp121 + v44 blend audit
+├── exp123b_score_eval.py              score exp123 + v45 blend audit
+├── exp124_freq_band_gate.py           frequency-band physics gate (no learning)
+├── exp136b_score_eval.py              score exp136b + v46 blend audit
+└── _outputs/                          per-script caches
 ```
 
 ### `_lib/` — shared utilities
@@ -79,7 +148,7 @@ from _lib.data import build_ss, species_taxon_array, ...
 |---|---|
 | `data` | `build_ss()` (cached), `species_taxon_array()`, `aux_matrix()`, `load_labeled_mel()`, `load_perch_emb_labeled()` (cached), `load_perch_scores_labeled()` (cached), constants (paths, SEED, N_CLS, TAXA, FNAME_RE) |
 | `ivae` | `IVAE` model class, `train_full()`, `encode_all()`, `load_exp78_encoder()`, `kl_div()` |
-| `mel` | `make_mel_pool_gpu()`, `extract_pool_one_file()`, `extract_pool_many()` — torchaudio mel pipeline (T_POOL=16, N_MELS=128, matches exp78) |
+| `mel` | `make_mel_pool_gpu()`, `extract_pool_one_file()`, `extract_pool_many()` |
 | `eval_metrics` | `per_class_auc`, `macro_auc`, `per_taxon_macro`, `per_row_spearman`, `gpu_mlp_binary_auc` |
 
 **Don't duplicate `build_ss` / `IVAE` / mel extraction in new scripts.** Add helpers to `_lib/` instead.
@@ -90,40 +159,54 @@ from _lib.data import build_ss, species_taxon_array, ...
 |---|---|
 | `eval_soundscapes.py` | 11-file Val-A_v2 evaluation harness |
 
-## `_archive_2026_audits/`
+**Reminder**: Val-A and val_SS are *anti-correlated with LB at margin moves*. See CLAUDE.md "Key invariants".
 
-42 completed audit scripts + outputs. Findings recorded in `paper/exp_current.tex`. Kept for reproducibility.
+## Archives
 
-## Other archives
-
-`_archive_2026_pre_v26/`, `_archive_2025/`, `_deprecated/` — historical layers; nothing in production depends on them.
+| Folder | Contents |
+|---|---|
+| `_archive_2026_audits/` | Completed audits before v33 |
+| `_archive_2026_audits/post_v26/` | exp79–101 audits archived April 2026 (iVAE/site-fingerprint teardown, LR-correction lever, exhaustive signal hunt) |
+| `_archive_2026_dpo_dead_end/` | exp104–117: ~10 RL/DPO/SFT variants (all ≤ BCE on LOSO — info-theoretic ceiling) |
+| `_archive_2026_pre_v26/` | pre-v26 layer |
+| `_archive_2025/` | 2025 CNN-era code |
+| `_deprecated/` | Early collapsed attempts |
 
 ---
 
-## LB submission timeline
+## LB submission timeline (cumulative)
 
-| v | Config | LB | Δ vs v12 |
+For full mechanism analysis see CLAUDE.md "CURRENT STATE" section.
+
+| v | Config | LB | Δ vs v33 |
 |---|---|---|---|
-| v12 | 0.8P + 0.2 SED29 + V9 + Gauss              | 0.929 | 0 |
-| v17 | 0.8P + 0.2 SED41f                          | 0.922 | −0.007 |
-| v18 | v17 + exp44c overlay                       | 0.916 | −0.013 |
-| v19 | v17 + exp44g synth                         | 0.907 | −0.022 |
-| v20 | v17 + V9 gate                              | 0.929 | 0 |
-| v21 | v12 + V9 gate                              | 0.929 | 0 |
-| v22 | v12 + V9 + exp48 (site prior + cluster)    | 0.913 | −0.016 |
-| v23 | 0.8P + 0.1 S29 + 0.1 exp50                 | 0.928 | −0.001 |
-| **v24** | **0.8P + 0.2 exp50**                   | **0.930** | **+0.001** |
-| v25 | 0.5P + 0.5 exp50                           | 0.928 | −0.001 |
-| **v26** | **0.7P + 0.3 exp50**                   | **0.931** | **+0.002** |
-| v28 | v26 + exp51 27-head additive               | 0.929 | −0.002 vs v26 |
-| v29 | v26 + per-class OOF routing                | 0.927 | −0.004 vs v26 |
-| v32 | v26 + R5 aliveness routing (4 cls)         | 0.930 | −0.001 vs v26 |
-| **v33** | **v26 + L2c file-max coherence (α=0.10)** (production) | **0.932** | **+0.003** |
-| v34 | v33 + mel-iVAE z-kNN (exp78, w_z=0.05)     | 0.916 | −0.013 |
+| v12 | 0.8P + 0.2 SED29 + V9 + Gauss baseline | 0.929 | −0.003 |
+| v17 | 0.8P + 0.2 SED41f | 0.922 | −0.010 |
+| v22 | v12 + V9 + exp48 (site prior + cluster) | 0.913 | −0.019 |
+| **v24** | 0.8P + 0.2 exp50 (2025 BG) | **0.930** | −0.002 |
+| **v26** | 0.7P + 0.3 exp50 | **0.931** | −0.001 |
+| **v33** | v26 + L2c file-max coherence α=0.10 | **0.932** | reference |
+| v34 | v33 + mel-iVAE z-kNN (exp78) | 0.916 | −0.016 |
+| v36 | 5-way 0.5P + 4 SEDs each 0.125 | 0.915 | −0.017 |
+| v38–v41 | per-class LR-correction (LOSO 0.97) | 0.915–0.920 | −0.012 to −0.017 |
+| v43 | + 0.10 × P_NEW3 (Perch-init hybrid) | 0.923 | −0.009 |
+| v44 | + 0.10 × exp121 cross-region BG | 0.920 | −0.012 |
+| v45 | + 0.05 × exp123 bird-bias penalty | 0.918 | −0.014 |
+| v46 | + 0.10 × exp136b v3 pseudo retrain | 0.914 | −0.018 |
+| v47 | + exp136b W=0.10 non-Aves freeze | 0.916 | −0.016 |
+| v48 | + 0.05 × exp84b iNat ext (uniform) | 0.918 | −0.014 |
+| v49 | AudioMAE blend foundation-swap | 0.910 | −0.022 |
+| v50 | M5 MLP non-Aves freeze | 0.905 | −0.027 |
+| **v51** | **pure v33 reproduction (baseline reset)** | **0.917** | **Kaggle test refresh** |
 
-## Mechanism findings worth re-reading before proposing levers
+**Recent +0.002/step trajectory (v46→v48)** under regression band: dedup + Aves freeze + cleaner teacher each contribute. Productive next: exp84b non-Aves freeze, dose ablation, 4-way W_PERCH≥0.7.
 
-- **v18/v19/v22/v28/v34 all regressed**: any post-hoc lever fitted to the 55-file labeled SS pool inherits site shortcut.
-- **Only successful train-SS-touching mechanism**: exp50 — 2025-BG mixing during training enforces site-invariance, not post-hoc disentanglement.
-- **exp79–80 teardown**: site fingerprint dominates iVAE z-space. S19 holdout Insecta AUC = 0.073. LOSO Insecta AUC ≤ 0.30 for every feature set. Data limitation (4 Insecta sites only), not architecture limitation.
-- **Path forward**: bring in external positives (xeno-canto, iNat) and retrain SED with multi-region BG mixing. Lever-pulling on 55 files alone is exhausted.
+## Mechanism findings (read before proposing levers)
+
+- **W_PERCH ≥ 0.7 invariant**: any blend dropping below this regresses (v25, v36).
+- **val_SS / Val-A anti-correlated with LB**: 4 data points (exp50/121/123/136b → val_SS up, LB down). Same-site eval is structurally compromised.
+- **LOSO-site CV 0.97 invalidated**: exp99–100 → v38–v41 all regressed.
+- **Three universal failure modes**: (1) duplicates existing site-conflated SED signal, (2) train-SS-fitted structure, (3) reduces existing site-invariance.
+- **Pseudo-label v3/v7 broken**: circular distillation (pseudo source IS v33). exp136b → val_SS 0.907 → LB 0.914.
+- **Info-theoretic ceiling on optimization**: ~10 RL/DPO/SFT variants all ≤ BCE on LOSO. Bottleneck is data, not loss.
+- **Path forward**: external positives + multi-region BG mixing during training (exp50 mechanism), or test-time site adaptation, or synthetic BG diversification (exp154+ exploration).
