@@ -8,7 +8,9 @@ experiments/
 ├── _eval_harness/            11-file Val-A_v2 evaluation
 ├── _archive_2026_audits/     completed audits (paper-recorded, kept for reference)
 │   └── post_v26/             exp79–101 audits archived after v33 (April 2026)
-├── _archive_2026_dpo_dead_end/  exp104–117 RL/DPO variants, all ≤ BCE on LOSO
+├── _archive_2026_dpo_dead_end/        exp104–117 + exp122 RL/DPO variants, all ≤ BCE on LOSO
+├── _archive_2026_pseudo_dead_end/     exp125–140 + 147/147b: pseudo v0→v8 iteration chain (circular distillation)
+├── _archive_2026_audiomae_dead_end/   exp143–146 AudioMAE + DANN + blend probe (v49/v50 regressed)
 ├── _archive_2026_pre_v26/    pre-v26 work
 ├── _archive_2025/            2025 CNN-era code
 ├── _deprecated/              early collapsed attempts
@@ -54,46 +56,27 @@ Scripts that build artifacts loaded by the Kaggle inference notebook (`notebooks
 | `exp120_extract_2025_ta.py` | 2025 train_audio Perch cache | `exp120_outputs/ta25_perch.npz` |
 | `exp121_aggressive_synth.py` | Cross-region BG fine-tune — v44 (regressed −0.012) | `model-weights/exp121_aggressive_synth_sed.pt` |
 | `exp123_bird_bias_fix.py` | Surgical bird-bias penalty — v45 (regressed −0.014) | `model-weights/exp123_bird_bias_sed.pt` |
-| `exp136_v3_retrain.py` + `exp136b_v3_simple.py` | v3 pseudo retrain — v46/v47 (−0.018/−0.016) | `model-weights/exp136b_v3_pseudo_sed.pt` |
-| `exp150_v9_targeted_sed.py` | v7 retrain (didn't run, GPU blocked) | — |
 
-### Pseudo-label framework (v0 → v7, mostly dead end)
+### Pseudo-label ingredients (chain in `_archive_2026_pseudo_dead_end/`)
 
-CLAUDE.md "Pseudo-label work" section explains the circular-distillation problem.
+The full v0→v8 iteration chain (exp125–140 + 147/147b) was archived after
+circular-distillation diagnosis (CLAUDE.md "Pseudo-label work"). Only the
+LB-tested or deferred-but-referenced ingredients remain here:
 
-| Script | Stage |
+| Script | Status |
 |---|---|
-| `exp125_exp50_on_unlabeled.py` | exp50 scores on unlabeled SS |
-| `exp126_pseudo_label.py` | v0 pseudo construction |
-| `exp127_pseudo_forensics.py` | v0 audit |
-| `exp128_refine_pseudo.py` | v1 refinement |
-| `exp129_pseudo_retrain.py` | first SED retrain |
-| `exp130_verified_pseudo.py` + `exp130b_verified_v2.py` | v2 verification |
-| `exp131_pseudo_v2_retrain.py` | v2 retrain |
-| `exp132_pseudo_masked.py` | masked variant |
-| `exp133_confusion_signatures.py` | confusion-signature mapping |
-| `exp134_sonotype_pseudo.py` | sonotype pseudo |
-| `exp135_systematic_error_filter.py` | error filter |
-| `exp137_fp_fn_filter.py` | FP/FN filter |
-| `exp138_pseudo_audit.py` | audit |
-| `exp139_external_verify.py` | external verify |
-| `exp140_more_external.py` | extended external |
-| `exp142_v7_simple.py` | v7 (deferred — GPU blocked) |
-| `exp147_pseudo_site_strat.py` + `exp147b_pseudo_v8.py` | site-stratified pseudo |
-| `exp149_pseudo_v9_targeted.py` | v9 targeted |
+| `exp136_v3_retrain.py` + `exp136b_v3_simple.py` | v3 pseudo retrain — **v46/v47 ingredient** (LB 0.914/0.916) |
+| `exp142_v7_simple.py` | v7 retrain (deferred per CLAUDE.md "v7 not consumed") |
+| `exp149_pseudo_v9_targeted.py` + `exp150_v9_targeted_sed.py` | v9 targeted (deferred, didn't run) |
 
-### AudioMAE / DANN / blend audit (all regressed, see `_audiomae_local_audit` memory)
+### Blend / stacking audits
 
 | Script | Purpose |
 |---|---|
-| `exp143_audiomae_probe.py` (+ `b/c/d/e/f/g`) | AudioMAE probe variants — v49 LB 0.910, v50 LB 0.905 |
-| `exp144_full_diagnostic.py` | full diagnostic |
-| `exp145_problem_setting.py` | problem-setting audit |
-| `exp146_dann_probe.py` (+ `b/c`) | DANN site-adversarial probe |
-| `exp148_blend_normalisation.py` | blend normalization |
+| `exp148_blend_normalisation.py` | per-class z-score / rank blend (hengck23-suggested) |
 | `exp151_save_rank_quantiles.py` | rank-quantile artifact for Kaggle |
-| `exp152_save_m5_probe.py` | M5 MLP probe save |
-| `exp153_stacking.py` | LightGBM per-class stacking |
+| `exp152_save_m5_probe.py` | M5 MLP probe save (AudioMAE) |
+| `exp153_stacking.py` | LightGBM per-class stacking on Perch + 4 SEDs + AudioMAE M5 |
 
 ### Synthetic-data exploration (NEW, 2026-05-02)
 
@@ -167,7 +150,9 @@ from _lib.data import build_ss, species_taxon_array, ...
 |---|---|
 | `_archive_2026_audits/` | Completed audits before v33 |
 | `_archive_2026_audits/post_v26/` | exp79–101 audits archived April 2026 (iVAE/site-fingerprint teardown, LR-correction lever, exhaustive signal hunt) |
-| `_archive_2026_dpo_dead_end/` | exp104–117: ~10 RL/DPO/SFT variants (all ≤ BCE on LOSO — info-theoretic ceiling) |
+| `_archive_2026_dpo_dead_end/` | exp104–117 + exp122: ~10 RL/DPO/SFT variants (all ≤ BCE on LOSO — info-theoretic ceiling) |
+| `_archive_2026_pseudo_dead_end/` | exp125–140 + exp147/147b: v0→v8 pseudo-label iteration chain (circular distillation, see CLAUDE.md). v3/v7/v9 artifact-producing scripts retained in `_data_pipelines/`. |
+| `_archive_2026_audiomae_dead_end/` | exp143–146 + exp144/145: AudioMAE foundation-swap probe + DANN + blend audits (v49 LB 0.910, v50 LB 0.905). M5 probe saver kept active as `exp152_save_m5_probe.py`. |
 | `_archive_2026_pre_v26/` | pre-v26 layer |
 | `_archive_2025/` | 2025 CNN-era code |
 | `_deprecated/` | Early collapsed attempts |
