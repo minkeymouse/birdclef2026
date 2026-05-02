@@ -2973,3 +2973,138 @@ backbone), the LB-transferable lever space at inference time consists
 solely of universal physical priors at narrow optimal hyperparameters.
 Further LB gains require enriching the training-time data distribution
 or replacing the foundation model.
+
+
+% =====================================================================
+% Section appended 2026-05-03: Gap analysis vs public 0.943 notebook
+% =====================================================================
+
+\section{Public 0.943 stack and the +0.011 gap}
+
+\subsection{Discovery and revision of prior claims}
+
+On 2026-05-03 a public Kaggle notebook
+(\texttt{mattiaangeli/birdclef-2026-0-943-better-blend}, forked from
+\texttt{vyankteshdwivedi/birdclef-2026-onnx-perch-sequence-modeling})
+was identified at LB $0.941$--$0.943$. This is $+0.011$ above our v33
+production at $0.932$. The discovery prompted a re-audit of our own
+pipeline.
+
+A claim made earlier in the working notes -- ``we have never tried
+sequence modeling on Perch logits'' -- is incorrect and is retracted
+here. Cells 41 (ProtoSSM v4 training), 43 (ResidualSSM second-pass
+correction), and 48 (score fusion) of our production notebook
+\texttt{notebooks/birdclef-2026-perch-distill/notebook.ipynb} are part
+of the v33 inference path. The ``$0.7 \times \mathrm{Perch\_ONNX}$''
+shorthand used elsewhere in this document is best read as
+``$0.7 \times $ Perch+ProtoSSM ensemble''.
+
+\subsection{Component-by-component comparison}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Component & v33 & 0.943 stack \\
+\midrule
+Perch v2 ONNX                            & yes & yes \\
+ProtoSSM v4/v5 sequence model            & yes & yes \\
+ResidualSSM second-pass                  & yes & yes \\
+MLP probe on PCA-Perch                   & yes & yes (h=128,64; pca=64) \\
+Per-taxon temperature                    & V9 gate & T=0.95 / 1.10 \\
+Distilled SED model                      & exp50 single (HGNet-B0) & Tucker 5-fold ONNX ensemble \\
+SED mel filter range                     & 50--14000 Hz (n=128) & 20--16000 Hz (n=256), per-spec z-score \\
+Final blend                              & linear $0.7 P + 0.3$ SED & rank-percentile blend \\
+Conditional rescue rules                 & none & 3 rules: fake-only, proto-continuity, sed-spike \\
+Temporal smoothing                       & Gaussian $\sigma{=}0.5$ & adaptive $\alpha = \alpha_0 (1 - \mathrm{conf})$ \\
+Per-class threshold                      & none & isotonic + F1 grid \\
+File-coherence prior                     & file-max $\alpha{=}0.10$ & file\_max$^{0.4}$ rank-aware scale \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Decomposed gap}
+
+The three components present in the 0.943 stack and absent from v33 are
+the SED ensemble, the rank-percentile blend, and the rescue rules. Best
+estimates (one-out ablation if possible at submission time):
+
+\begin{itemize}
+\item \textbf{Tucker 5-fold ensemble vs.\ exp50 single}: estimated
+$+0.005$ to $+0.007$. A 5-fold ONNX ensemble reduces variance, and the
+wider mel-band ($20$--$16{,}000$ Hz vs.\ $50$--$14{,}000$ Hz) plus
+per-spectrogram z-score normalisation likely captures
+high-frequency texture content (insect harmonics in the 14--16~kHz
+range) that exp50's filterbank cannot.
+
+\item \textbf{Rank-percentile blend vs.\ linear blend}: estimated
+$+0.002$ to $+0.005$. Per-class rank-percentile is AUC-invariant per
+class, but blending in rank space induces a soft per-class calibration
+without an explicit isotonic fit. This is structurally similar to the
+2025 first-place ``rank-aware scaling'' trick.
+
+\item \textbf{3 rescue rules}: estimated $+0.002$ to $+0.003$. Each
+rescue handles a specific failure mode of two-stream fusion:
+$(i)$~ProtoSSM says yes / SED says no with high local rank;
+$(ii)$~ProtoSSM context-rank high under a fat-tail
+$t$-distribution kernel ($\pm 3$ windows) where SED is silent;
+$(iii)$~SED locally spikes ($> 0.95$ rank) where ProtoSSM is low. The
+rescues operate on rank space and use small fixed blend weights.
+\end{itemize}
+
+The remaining residual ($\approx +0.001$) is plausibly distributed
+across adaptive smoothing, per-class thresholds, isotonic calibration,
+and the slightly different MLP probe configuration.
+
+\subsection{Closure plan}
+
+Closure proceeds one component at a time so that each LB increment is
+attributable. Each step uses a single submission slot and is rolled
+back on regression rather than stacked.
+
+\begin{enumerate}
+\item \textbf{v55 = v33 + Tucker 5-fold SED ensemble} (replace exp50;
+preserve linear blend). Largest single lever; estimated $+0.005$ to
+$+0.007$.
+\item \textbf{v56 = v55 + rank-percentile blend} (replace linear blend
+with rank-pct). Estimated $+0.002$ to $+0.005$.
+\item \textbf{v57 = v56 + 3 rescue rules}. Estimated $+0.002$ to
+$+0.003$.
+\item \textbf{(v58, budget permitting)} adaptive smoothing
++ per-class threshold + isotonic.
+\end{enumerate}
+
+A pre-LB local probe on labeled SS is run for each step. Acceptance
+criteria: per-step macro $\Delta > 0$ vs.\ the previous step's audit
+result and Spearman$_\text{row} > 0.998$. Profile-failure modes
+(W$_\mathrm{Perch}$ drop below 0.7, large Aves regression, single-class
+catastrophic regression) trigger rollback before LB.
+
+\subsection{Risks}
+
+\begin{itemize}
+\item \textbf{Wall-time budget.} Tucker SED is 5 ONNX folds over the
+full test set on CPU. Adding the 5 folds to the existing
+Perch+ProtoSSM+exp50 path may exceed the 90-min Kaggle code-comp
+limit. A dev-run wall measurement is required before the LB push.
+\item \textbf{Memory.} The public notebook caps MLP probe per-class
+training rows at 3{,}000 to keep RAM in check. The Kaggle 30~GB
+instance has been the observed envelope.
+\item \textbf{Rank-blend interaction with the V9 taxon gate.} The V9
+gate operates in probability space. Default behaviour: gate first
+(retain current taxonomy filter) and rank-transform after.
+\item \textbf{Production LB is still 0.932} (user-confirmed
+2026-05-03). The recent v51--v54 submissions ($0.917$--$0.918$) were
+diagnostic runs with teachers \emph{disabled}, not the active baseline.
+\end{itemize}
+
+\subsection{Note on the earlier ``ceiling exhaustion'' framing}
+
+Earlier sections of these working notes argued that the post-v33
+inference-time lever space was ``exhausted''. That framing is retracted
+in light of the 0.943 public stack. The correct statement is that
+\emph{our} post-v33 lever sweep -- 17 LB submissions through v50 -- 
+exhausted modifications within the configurations we explored. Those
+configurations did not include ensemble distilled SEDs, rank-percentile
+fusion, or stream-conditional rescue rules. The lever space outside
+our explored set is non-empty, and the $+0.011$ public delta is
+empirical evidence that orthogonal mechanisms remain available.

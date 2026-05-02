@@ -2,11 +2,29 @@
 
 Guidance for Claude Code in this repository.
 
-## CURRENT STATE (2026-05-02)
+## CURRENT STATE (2026-05-03)
 
-**Production LB: v33 = 0.932** = `0.7 × Perch_ONNX + 0.3 × exp50_SED + V9 taxon-gate + Gauss σ=0.5 + file-max coherence α=0.10`.
+**Production LB: v33 = 0.932** = `0.7 × (Perch+ProtoSSM_v4 ensemble) + 0.3 × exp50_SED + V9 taxon-gate + Gauss σ=0.5 + file-max α=0.10`.
 
-17 distinct LB-tested mechanisms after v33; only **v33** and **v24** (each +0.001 vs v12 baseline 0.929) are positive. Every other modification regresses −0.002 to −0.018. **Inference-time lever space is exhausted.**
+Notebook cells 41 (ProtoSSM v4 train) / 43 (ResidualSSM second-pass) /
+48 (score fusion) are part of the v33 pipeline — **ProtoSSM IS in v33**,
+contrary to earlier (incorrect) memory entries. The "0.7 × Perch_ONNX"
+shorthand referred to the Perch+ProtoSSM ensemble, not raw Perch alone.
+
+**Public 0.943 lever (2026-05-03)**: `mattiaangeli/birdclef-2026-0-943-better-blend`
+hits LB 0.943, +0.011 over our 0.932. Same ProtoSSM architecture; gap is:
+1. Tucker `bc2026-distilled-sed-public` 5-fold SED ensemble (mel-256,
+   fmin-20, fmax-16000, per-spec z-score) replacing our exp50 single.
+2. Rank-percentile blend in place of our linear `0.7 P + 0.3 SED`.
+3. 3 conditional rescue rules (fake_only, proto_continuity with t-dist
+   fat-tail kernel ±3 windows, sed_local_spike).
+See memory `project_0943_gap_analysis.md` for component-by-component
+breakdown and predicted +Δ per step.
+
+Pre-0.943-discovery lever audits remain valid: 17 distinct post-v33
+modifications regressed −0.002 to −0.018. The "lever exhaustion"
+language (DELETED 2026-05-03) was wrong — orthogonal levers exist when
+we look outside our own attempts (public ProtoSSM stack works).
 
 ### LB ladder (post-v42)
 | v | Modification | LB Δ vs v33 |
@@ -69,12 +87,15 @@ Goal: extract supervision from unlabeled SS to strengthen SED beyond labeled-55-
 
 We tested ~10 RL/DPO/SFT variants (exp112-119, exp122). All ≤ BCE on LOSO. End-to-end audio DPO (exp122) was *worse* than BCE on val_SS. Reason: DPO/RL's advantage requires reward richer than supervised labels. Our reward IS the binary species labels. BCE is essentially Bayes-optimal here. Hard mining ≈ aggressive BCE; multi-label "rejected = random negative" introduces false-negative noise.
 
-**Implication: the bottleneck is the data, not the optimization.** Only paths that add genuinely new information can break v33:
+**Implication: the bottleneck is data + fusion, not the loss optimization.** Only paths that add genuinely new information can break v33:
+- **Public 0.943 stack** (highest-confidence lever 2026-05-03): Tucker
+  5-fold SED + rank-percentile blend + 3 rescue rules. Expected
+  closure +0.011 over 4 LB submissions (v55 → v57+).
 - Multi-region external (10× Mammalia/Reptilia from non-Pantanal sites)
 - A different foundation model (BirdNET / AudioMAE / BEATs / Perch v3)
 - DANN site-adversarial training with unlabeled SS (explicit invariance constraint)
 - Earlier-year SS labels (2023, 2024 if obtainable)
-- **Synthetic data via domain randomization** (DRASDIC + Soltero 2025): expand BG pool from single-site Pantanal to multi-region (xeno-canto silent windows) — exp154 confirmed +38% PSD diversity from 360-file diagnostic; full extraction (exp155) and Perch QC (exp156) deferred
+- **Synthetic data via domain randomization** (DRASDIC + Soltero 2025): expand BG pool from single-site Pantanal to multi-region (xeno-canto silent windows) — exp154 confirmed +38% PSD diversity, exp159 retrain showed 9k multi-region pool but final ckpt converged to Pearson 0.989 with exp50 (lost orthogonality at convergence). Drop in favor of higher-confidence public stack.
 
 ## LB submission discipline (MUST READ)
 
