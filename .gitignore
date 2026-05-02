@@ -44,23 +44,21 @@ __pycache__/
 *.zip
 *.tar.gz
 *.tgz
+*.gz
 *.rar
 *.7z
-*.gzmodel-weights/*.pth
-experiments/exp*_outputs/
 ir_models/
 
-# Large data caches (added 2026-04-27)
+# Large data caches
 *.npz
 *.npy
 *.parquet
 *.arrow
 # Model weight directories
 model-weights/
-# Experiment output directories (already partially covered; restate for clarity)
-experiments/_audits_post_v26/exp*_outputs/
-experiments/_archive_*/outputs/
-experiments/_data_pipelines/exp*_outputs/
+# Experiment output directories (broad — covers all subdirs)
+experiments/exp*_outputs/
+experiments/**/exp*_outputs/
 # External downloaded audio (large)
 data/external/
 # Perch backbone (big binary)
