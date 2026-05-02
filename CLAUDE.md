@@ -124,7 +124,7 @@ Kaggle is **hard rate-limited (5 submissions/day)**. Each comp re-run ~1 hour wa
 
 ## Project layout
 
-- `src/` — shared library from 2025 (mel-spec pipeline; mostly superseded by Perch-distill flow)
+- ~~`src/`~~ — archived to `experiments/_archive_2025/src/` (2025 mel-spec pipeline, unused by current Perch-distill flow)
 - `experiments/` — numbered experiment scripts. **`experiments/README.md` is the canonical index** — read before adding new exps
 - `experiments/_archive_2025/`, `_archive_2026_*` — historical layers. Useful as negative-result reference (e.g., `_archive_2026_dpo_dead_end/` records ~10 RL/DPO variants that confirmed BCE is Bayes-optimal here).
 - `experiments/_data_pipelines/` — pseudo build, external download, refinement
