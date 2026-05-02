@@ -4,7 +4,7 @@ Guidance for Claude Code in this repository.
 
 ## CURRENT STATE (2026-05-02)
 
-**Production LB: v33 = 0.932** = `0.7 × Perch_ONNX + 0.3 × exp50_SED + V9 taxon-gate + Gauss σ=0.5 + file-max coherence α=0.10`. **v51 reset = 0.917** after Kaggle test refresh — treat as new baseline.
+**Production LB: v33 = 0.932** = `0.7 × Perch_ONNX + 0.3 × exp50_SED + V9 taxon-gate + Gauss σ=0.5 + file-max coherence α=0.10`.
 
 17 distinct LB-tested mechanisms after v33; only **v33** and **v24** (each +0.001 vs v12 baseline 0.929) are positive. Every other modification regresses −0.002 to −0.018. **Inference-time lever space is exhausted.**
 
@@ -211,7 +211,7 @@ Live thesis (post negative-result pivot): "Hidden-distribution covariate shift d
 - ~10 RL/DPO variants ≤ BCE (info-theoretic interpretation)
 - 6-test refutation of iVAE/iVDFM on Perch features (publishable negative)
 
-`paper/experiments.tex` (formal draft) stops at v12; needs author port of v17–v51 + pseudo-circularity + AudioMAE + info-theoretic ceiling. Header note added 2026-05-02 marking gap and pointing to `paper/exp_current.tex` (running notes, last touched 2026-04-27, covers through v36 era).
+`paper/experiments.tex` (formal draft) stops at v12; needs author port of v17–v50 + pseudo-circularity + AudioMAE + info-theoretic ceiling. Header note added 2026-05-02 marking gap and pointing to `paper/exp_current.tex` (running notes, last touched 2026-04-27, covers through v36 era).
 
 ## Top-scorer reference (digested 2026-04-20)
 

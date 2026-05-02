@@ -34,7 +34,7 @@ Avoids the bash-pipe-buffer pitfall where `uv run python ... 2>&1 | tail -50` hi
 
 Scripts that build artifacts loaded by the Kaggle inference notebook (`notebooks/birdclef-2026-perch-distill/`). Caches large, gitignored.
 
-### Active in v33 production (LB 0.932 → reset 0.917)
+### Active in v33 production (LB 0.932)
 
 | Script | Purpose | Output |
 |---|---|---|
@@ -182,7 +182,6 @@ For full mechanism analysis see CLAUDE.md "CURRENT STATE" section.
 | v48 | + 0.05 × exp84b iNat ext (uniform) | 0.918 | −0.014 |
 | v49 | AudioMAE blend foundation-swap | 0.910 | −0.022 |
 | v50 | M5 MLP non-Aves freeze | 0.905 | −0.027 |
-| **v51** | **pure v33 reproduction (baseline reset)** | **0.917** | **Kaggle test refresh** |
 
 **Recent +0.002/step trajectory (v46→v48)** under regression band: dedup + Aves freeze + cleaner teacher each contribute.
 
