@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "demucs>=4.0.1",
     "kaggle>=2.0.1",
     "librosa>=0.11.0",
     "lightgbm>=4.6.0",

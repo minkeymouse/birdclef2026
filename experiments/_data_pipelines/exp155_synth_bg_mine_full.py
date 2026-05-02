@@ -1,23 +1,22 @@
-"""exp155 (DEFERRED — awaiting go-ahead): Full multi-region BG mining from
-train_audio.
+"""exp155 — Multi-region BG mining from train_audio (sensible, ~12k pool).
 
-Builds on exp154 diagnostic (+38% PSD diversity confirmed). Extracts bottom-K
-lowest-RMS 5-sec windows per train_audio clip across ALL 35k+ files. Saves
-raw audio + metadata.
+Builds on exp154 diagnostic (+38% PSD diversity confirmed). Sample ~12k
+train_audio files stratified by lat/lon bucket, take 1 quietest 5-sec
+window per file. Pool size matches existing `bg_quiet_2025.npz` (11.9k
+Pantanal-only) — comparable scale, but multi-region.
 
-Cost: ~15 min CPU (8 workers), ~24 GB disk for ~43k windows × 5s × 32kHz × f32.
+**Memory note (2026-05-03):** Earlier version used K=2 × all 35k files =
+55k windows × 640 KB = 33 GB single array, which OOM'd a 64 GiB machine
+during np.stack (peak ~66 GB). This version is bounded to ~12k × 640 KB
+= 7.7 GB peak — comfortable for a 64 GiB box.
 
-Two-stage filter (this is stage 1):
-  Stage 1 (this script): energy-based (bottom-K RMS per file)
-  Stage 2 (exp156): Perch QC — drop any window with top-1 species prob > QC_TAU
-
-Output:
-  exp155_outputs/bg_multiregion_raw.npz   shape (N, 160000) float32
+Output (exp50/exp159 compatible — same key as bg_quiet_2025.npz):
+  exp155_outputs/bg_multiregion_raw.npz   `windows`: (N, 160000) float32
   exp155_outputs/bg_multiregion_meta.parquet   per-window metadata
 """
-import sys, os, time, json
+import sys, os, time, json, random
 from pathlib import Path
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
 import numpy as np
 import pandas as pd
 import soundfile as sf
@@ -30,71 +29,107 @@ OUT.mkdir(exist_ok=True)
 SR = 32000
 WIN_SEC = 5
 WIN_SAMPLES = SR * WIN_SEC
-BOTTOM_K = 2     # take 2 lowest-RMS windows per file
+TARGET_N = 12000      # match existing 11.9k Pantanal pool
 N_WORKERS = 8
+SEED = 42
+
+random.seed(SEED); np.random.seed(SEED)
 
 
-def file_quiet_windows(arg):
-    """Return (windows, rms_list, fname) for one file, k lowest RMS."""
+def lat_lon_bucket(lat, lon, size=10):
+    if pd.isna(lat) or pd.isna(lon):
+        return "NA"
+    return f"{int(np.floor(lat/size)*size):+d}_{int(np.floor(lon/size)*size):+d}"
+
+
+def file_quiet_window(arg):
+    """Return (idx, fname, win, rms) — single quietest 5-sec window from file."""
     idx, fname = arg
     path = DATA / "train_audio" / fname
     try:
         x, sr = sf.read(str(path), dtype="float32")
     except Exception:
-        return idx, fname, [], []
-    if sr != SR or len(x) < WIN_SAMPLES:
-        return idx, fname, [], []
+        return idx, fname, None, None
+    if sr != SR or len(x) < WIN_SAMPLES * 2:
+        return idx, fname, None, None
     if x.ndim > 1:
         x = x.mean(axis=1)
     n_win = len(x) // WIN_SAMPLES
-    if n_win < 2:
-        return idx, fname, [], []
-    rms = np.array([np.sqrt(np.mean(x[i*WIN_SAMPLES:(i+1)*WIN_SAMPLES]**2))
-                    for i in range(n_win)])
-    order = np.argsort(rms)[:BOTTOM_K]
-    wins = [x[i*WIN_SAMPLES:(i+1)*WIN_SAMPLES].copy().astype(np.float32) for i in order]
-    rms_sel = rms[order].astype(np.float32).tolist()
-    return idx, fname, wins, rms_sel
+    rms = np.array([
+        np.sqrt(np.mean(x[i*WIN_SAMPLES:(i+1)*WIN_SAMPLES]**2))
+        for i in range(n_win)
+    ])
+    i_q = int(np.argmin(rms))
+    win = x[i_q*WIN_SAMPLES:(i_q+1)*WIN_SAMPLES].astype(np.float32).copy()
+    return idx, fname, win, float(rms[i_q])
+
+
+def stratified_sample(train, n_target):
+    """Return n_target file rows, stratified by lat/lon bucket (10° grid)."""
+    train = train.copy()
+    train["bucket"] = [lat_lon_bucket(la, lo)
+                        for la, lo in zip(train.latitude, train.longitude)]
+    counts = train.bucket.value_counts()
+    n_buckets = len(counts)
+    quota = max(1, n_target // n_buckets)
+    pieces = []
+    for b in counts.index:
+        sub = train[train.bucket == b]
+        take = min(len(sub), quota)
+        pieces.append(sub.sample(take, random_state=SEED))
+    sampled = pd.concat(pieces).reset_index(drop=True)
+    if len(sampled) > n_target:
+        sampled = sampled.sample(n_target, random_state=SEED).reset_index(drop=True)
+    elif len(sampled) < n_target:
+        # top up from largest bucket
+        rest = train[~train.filename.isin(sampled.filename)]
+        topup = rest.sample(min(n_target - len(sampled), len(rest)), random_state=SEED)
+        sampled = pd.concat([sampled, topup]).reset_index(drop=True)
+    return sampled
 
 
 def main():
     train = pd.read_csv(DATA / "train.csv")
-    args = list(enumerate(train.filename.tolist()))
-    print(f"[exp155] mining {len(args)} train_audio files, K={BOTTOM_K}, workers={N_WORKERS}")
+    sampled = stratified_sample(train, TARGET_N)
+    print(f"[exp155] sampled {len(sampled)} files across {sampled['bucket'].nunique()} buckets")
+    print(f"  expected output: {len(sampled) * WIN_SAMPLES * 4 / 1e9:.1f} GB")
+    bucket_dist = sampled.bucket.value_counts().head(8).to_dict()
+    print(f"  top buckets: {bucket_dist}")
 
+    args = list(zip(sampled.index.tolist(), sampled.filename.tolist()))
     t0 = time.time()
-    all_wins = []
-    meta_rows = []
+    wins = [None] * len(args)
+    rms = [None] * len(args)
+
     with Pool(N_WORKERS) as pool:
-        for cnt, (idx, fname, wins, rms_sel) in enumerate(pool.imap_unordered(file_quiet_windows, args, chunksize=8)):
-            for w, r in zip(wins, rms_sel):
-                all_wins.append(w)
-                row = train.iloc[idx]
-                meta_rows.append({
-                    "src_idx": idx,
-                    "filename": fname,
-                    "rms": r,
-                    "primary_label": row.primary_label,
-                    "class_name": row.class_name,
-                    "latitude": row.latitude,
-                    "longitude": row.longitude,
-                    "collection": row.collection,
-                })
+        for cnt, (idx, fname, win, r) in enumerate(
+            pool.imap_unordered(file_quiet_window, args, chunksize=8)
+        ):
+            if win is not None:
+                wins[idx] = win
+                rms[idx] = r
             if (cnt + 1) % 1000 == 0:
                 elapsed = time.time() - t0
                 eta = elapsed * (len(args) / (cnt + 1) - 1)
-                print(f"  [{cnt+1}/{len(args)}] wins={len(all_wins)} t={elapsed:.0f}s ETA={eta:.0f}s")
+                ok = sum(1 for w in wins if w is not None)
+                print(f"  [{cnt+1}/{len(args)}] ok={ok} t={elapsed:.0f}s ETA={eta:.0f}s",
+                      flush=True)
 
+    keep = [i for i, w in enumerate(wins) if w is not None]
+    n_kept = len(keep)
     elapsed = time.time() - t0
-    print(f"[exp155] done: {len(all_wins)} windows from {len(args)} files in {elapsed:.0f}s")
+    print(f"[exp155] mining done: {n_kept}/{len(args)} files yielded windows in {elapsed:.0f}s")
 
-    arr = np.stack(all_wins).astype(np.float32)
-    meta = pd.DataFrame(meta_rows)
+    # Single np.stack — small enough (~7.7 GB) to fit comfortably
+    arr = np.stack([wins[i] for i in keep])
     print(f"  arr.shape={arr.shape}, ~{arr.nbytes/1e9:.1f} GB")
-    print(f"  unique src classes: {meta.class_name.value_counts().to_dict()}")
+
+    sampled_kept = sampled.iloc[keep].copy().reset_index(drop=True)
+    sampled_kept["rms"] = [rms[i] for i in keep]
+    print(f"  unique src classes: {sampled_kept.class_name.value_counts().to_dict()}")
 
     np.savez(OUT / "bg_multiregion_raw.npz", windows=arr)
-    meta.to_parquet(OUT / "bg_multiregion_meta.parquet")
+    sampled_kept.to_parquet(OUT / "bg_multiregion_meta.parquet")
     print(f"[exp155] saved → {OUT}")
 
 
