@@ -122,6 +122,14 @@ Kaggle is **hard rate-limited (5 submissions/day)**. Each comp re-run ~1 hour wa
 
 **Resolved 2026-05-02**: GPU driver mismatch fixed (NVML + kernel both 580.142). 32 GB free.
 
+**Long-running jobs MUST survive shell/tmux death.** `Bash run_in_background: true` only protects within the active Claude session — when tmux dies, child python processes get SIGHUP and die mid-run. Use the robust pattern instead:
+```bash
+LOG=/data/birdclef2026/experiments/_scratch_logs/<name>_$(date +%Y%m%d_%H%M%S).log
+nohup setsid uv run python -u <script> > "$LOG" 2>&1 < /dev/null &
+disown
+```
+`setsid` creates a new session (detaches from tmux), `nohup` ignores SIGHUP, `< /dev/null` detaches stdin, `disown` removes from shell job control. Survives tmux kill, ssh disconnect, Claude session restart. Recover by checking output files / log tail rather than relying on in-memory PID. (Incident 2026-05-03: tmux died mid-exp155, lost 35-min of progress; recovered with pattern above.)
+
 ## Project layout
 
 - ~~`src/`~~ — archived to `experiments/_archive_2025/src/` (2025 mel-spec pipeline, unused by current Perch-distill flow)
