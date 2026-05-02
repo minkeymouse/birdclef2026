@@ -199,14 +199,6 @@ For full mechanism analysis see CLAUDE.md "CURRENT STATE" section.
 | v50 | M5 MLP non-Aves freeze | 0.905 | −0.027 |
 | **v51** | **pure v33 reproduction (baseline reset)** | **0.917** | **Kaggle test refresh** |
 
-**Recent +0.002/step trajectory (v46→v48)** under regression band: dedup + Aves freeze + cleaner teacher each contribute. Productive next: exp84b non-Aves freeze, dose ablation, 4-way W_PERCH≥0.7.
+**Recent +0.002/step trajectory (v46→v48)** under regression band: dedup + Aves freeze + cleaner teacher each contribute.
 
-## Mechanism findings (read before proposing levers)
-
-- **W_PERCH ≥ 0.7 invariant**: any blend dropping below this regresses (v25, v36).
-- **val_SS / Val-A anti-correlated with LB**: 4 data points (exp50/121/123/136b → val_SS up, LB down). Same-site eval is structurally compromised.
-- **LOSO-site CV 0.97 invalidated**: exp99–100 → v38–v41 all regressed.
-- **Three universal failure modes**: (1) duplicates existing site-conflated SED signal, (2) train-SS-fitted structure, (3) reduces existing site-invariance.
-- **Pseudo-label v3/v7 broken**: circular distillation (pseudo source IS v33). exp136b → val_SS 0.907 → LB 0.914.
-- **Info-theoretic ceiling on optimization**: ~10 RL/DPO/SFT variants all ≤ BCE on LOSO. Bottleneck is data, not loss.
-- **Path forward**: external positives + multi-region BG mixing during training (exp50 mechanism), or test-time site adaptation, or synthetic BG diversification (exp154+ exploration).
+For invariants, failure modes, anti-patterns, and the locally-or-LB-verified-negative list, **see CLAUDE.md** — that is the single source of truth for strategic state. This README is the structural index only.
