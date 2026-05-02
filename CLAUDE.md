@@ -181,7 +181,7 @@ uv run kaggle competitions submissions -c birdclef-2026 --csv | head -5
 
 Comp re-run logs only on Kaggle web UI. If `publicScore` empty → check web UI.
 
-**Notebook discipline**: edit existing notebook in place; Kaggle versions automatically. Never create new slugs per variant.
+**Notebook discipline**: edit existing notebook in place; Kaggle versions automatically. Never create new slugs per variant. Per-version patches live in `notebooks/birdclef-2026-perch-distill/patches/` (one .py per LB submission, kept as record).
 
 ## Commands
 
