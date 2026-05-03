@@ -66,20 +66,13 @@ tucker_sed reproduces cached scores 36/36 exact match; final_blend
 reproduces v58 (+0.117), mattia full-rescues (+0.087), no-rescues
 (+0.078) numbers exactly.
 
-**Source-dump modules** (need Kaggle-cell context; not yet self-contained):
+**Source-dump modules** (under `lib/_dumps/` — NOT importable, NOT in public API):
 
-| module | role | source cell(s) |
-|---|---|---|
-| `config.py` | CFG dict, runtime constants | 5 |
-| `data.py` | taxonomy + sample submission + train SS labels | 7 |
-| `perch.py` | Perch v2 ONNX loader + window-level inference | 9, 10, 12, 13 |
-| `mlp_probe.py` | PCA-Perch MLP probe + isotonic calibration | 21-23 |
-| `protossm.py` | LightProtoSSM + ResidualSSM (training) | 27, 29 |
-| `pipeline.py` | OOF + full inference orchestration | 30, 31, 33, 35 |
-
-These are textual extracts; running them outside the notebook requires
-proper standalone refactor (TODO: extract Kaggle-only paths, fix
-imports, isolate state dependencies).
+See `lib/_dumps/README.md`. These are raw cell extracts of
+config/data/perch/mlp_probe/protossm/pipeline. They reference Kaggle-only
+paths and use names defined in earlier cells without imports. Use them
+as code-archaeology reference only; refactor into self-contained modules
+before importing.
 
 ## Forward extension procedure
 

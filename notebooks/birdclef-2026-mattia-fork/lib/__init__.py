@@ -2,19 +2,22 @@
 
 LB-verified at 0.941 (kernel ultimatumgame/birdclef-2026-mattia-fork v1, 2026-05-03).
 
-Self-contained, locally importable modules:
-  paths        Kaggle-vs-local path resolution (TUCKER_DIR, PERCH_ONNX, etc)
-  tucker_sed   5-fold ONNX SED ensemble inference
-  rank_scale   rank-aware file_max + adaptive δ smoothing + file-max blend
+Public API (5 self-contained, locally importable modules):
+  paths        Kaggle-vs-local path resolution
+  tucker_sed   Tucker 5-fold ONNX SED inference
+  rank_scale   rank-aware file_max scaling + adaptive δ smoothing + file-max blend
   helpers      macro AUC + Gaussian smoothing + per-taxon temperature
   final_blend  rank-pct blend + 3 rescue rules + linear blend
 
-Source-dump modules (not yet self-contained; need to be re-extracted with
-proper imports/paths if you want to use them outside the notebook):
-  config, data, perch, mlp_probe, protossm, pipeline
+Verified by experiments/_audits_post_v26/exp168_mattia_lib_sanity.py:
+tucker_sed reproduces cached scores 36/36 exact match; final_blend
+reproduces v58 (+0.117), mattia full-rescues (+0.087), no-rescues
+(+0.078) numbers exactly.
 
-For local audits, use the self-contained modules together with cached
-labeled-SS scores at experiments/_audits_post_v26/exp80_outputs/.
+Source-only dumps (NOT importable, NOT in public API):
+See `_dumps/` for raw cell extracts of config/data/perch/mlp_probe/
+protossm/pipeline. Kept for code-archaeology only. Refactor each into
+self-contained module before using.
 """
 from . import paths
 from . import tucker_sed
