@@ -3215,3 +3215,105 @@ Candidate forward levers (each $+0.001$ to $+0.003$ expected):
 \item Tune SED\_W or rescue thresholds on a 0.941-anchored OOF.
 \item Add a fourth rescue rule from observed mattia-fork OOF failures.
 \end{enumerate}
+
+
+% =====================================================================
+% Section appended 2026-05-03: definitive component ablation (exp165)
+% =====================================================================
+
+\section{Definitive ablation of the +0.009 jump (exp165)}
+
+\subsection{Rationale}
+
+The previous section attributed the v33 $\to$ v57 LB jump to a synergy
+of late-fusion sources (5-fold ensemble, rank-pct calibration, and
+3 rescue rules). To test this hypothesis cleanly we ran a controlled
+factor grid on the labeled SS eval (122 rows): SED choice
+$\times$ fusion mode $\times$ rescue subset.
+
+\subsection{Results}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+Variant & macro\_d $\Delta$ & sp\_row & profile \\
+\midrule
+\textbf{linear Tucker\_5fold W$=$0.30 rescues$=$none} & $\mathbf{+0.117}$ & $0.991$ & A (likely positive) \\
+linear Tucker\_fold0\_only W$=$0.30 rescues$=$none & $+0.111$ & $0.990$ & A \\
+rank Tucker\_5fold rescues$=$spike (only) & $+0.087$ & $0.401$ & C \\
+rank Tucker\_5fold rescues$=$all & $+0.087$ & $0.409$ & C \\
+rank Tucker\_5fold rescues$=$none & $+0.078$ & $0.404$ & C \\
+rank Tucker\_5fold rescues$=$fake (only) & $+0.078$ & $0.414$ & C \\
+rank Tucker\_5fold rescues$=$cont (only) & $+0.078$ & $0.401$ & C \\
+linear exp50 W$=$0.30 rescues$=$none & $+0.008$ & $0.996$ & A \\
+v33 LINEAR ref & $0.000$ & $1.000$ & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Decomposition}
+
+\begin{itemize}
+\item \textbf{SED choice dominates.} Replacing exp50 with Tucker\_5fold
+in linear blend at $W{=}0.30$ swings macro\_d by $+0.109$ (from $+0.008$
+to $+0.117$). The SED quality gap is by far the largest factor.
+
+\item \textbf{5-fold ensemble adds little.} fold0-only $+0.111$ vs
+5-fold ensemble $+0.117$ -- the ensemble contribution is only $+0.006$.
+Most of Tucker's value is in fold0 alone (from the distillation
+recipe and mel range, not the variance reduction).
+
+\item \textbf{Linear beats rank in our pipeline.} Linear
+$+0.117$ vs rank-pct $+0.078$ for the same Tucker stream. Rank-pct
+collapses sp\_row to $0.40$ as a side effect of per-class re-normalisation,
+and the macro\_d itself is also lower. Mattia's stack uses rank-pct
+because their streamA (Perch+ProtoSSM raw) is uncalibrated; our streamA
+is v33 itself, which is already calibrated through V9 + Gauss + file-max,
+so linear blending of Tucker on v33 retains both higher macro\_d and
+near-perfect sp\_row.
+
+\item \textbf{Rescues contribute only via the spike rule.} In rank
+space, rescues add $+0.009$ macro\_d ($+0.078 \to +0.087$). Of the
+three rules, only \emph{sed-local-spike} is non-trivially positive
+($+0.009$); \emph{fake-only} and \emph{proto-continuity} are essentially
+neutral ($\le +0.001$) when applied to a v33-as-streamA setup. The
+rescues are tuned for a Perch+ProtoSSM streamA, not v33.
+\end{itemize}
+
+\subsection{Why our prior v55 / v56 attempts under-delivered}
+
+\begin{itemize}
+\item \textbf{v55} used Tucker linear at $W{=}0.10$, where the local
+gain is only $+0.077$. With a $\le 0.001$ LB-resolution and the team
+public-LB displaying only the team-best score, a small linear-W
+contribution can be hidden below the rounding floor. The architecture
+choice was right; the dose was too conservative.
+
+\item \textbf{v56} used Tucker rank-blend at $W{=}0.30$ without
+rescues. Rank-pct on v33 (an already-calibrated streamA) actively
+hurts both macro\_d and sp\_row relative to linear blending of the
+same Tucker stream. The result was LB $0.931 / 0.932$.
+
+\item \textbf{v57} (Mattia fork as-is) gives LB $0.941$ because the
+rank-pct $+$ rescue architecture is matched to Mattia's specific
+streamA composition. Replicating that architecture on top of v33
+would not be expected to improve over linear blending of Tucker on
+v33, and the local audit confirms this.
+\end{itemize}
+
+\subsection{Implication: re-test linear Tucker at higher W}
+
+The strongest local profile observed in any experiment to date is
+linear v33 $+$ Tucker\_5fold at $W{=}0.30$: macro\_d $+0.117$,
+sp\_row $0.991$, with all five taxa positive. This is a textbook
+``mechanism class A'' candidate. The natural next LB submission is
+this configuration -- a reissue of the v55 patch with $W$ raised
+from $0.10$ to $0.30$.
+
+If this transfers, it indicates that our v33 $+$ Tucker linear path
+is at least as strong as Mattia's rank-pct-with-rescues path, and
+the late-fusion architecture is not the load-bearing source of the
++0.009 LB delta in this benchmark. If it does not transfer (LB stays
+at v33 levels), then despite the local profile something specific
+to Mattia's stream-A composition (ProtoSSM-only, MLP probe, etc.)
+matters for LB transfer in a way the v33 streamA cannot reproduce.
