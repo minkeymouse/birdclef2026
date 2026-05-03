@@ -182,7 +182,18 @@ For full mechanism analysis see CLAUDE.md "CURRENT STATE" section.
 | v48 | + 0.05 × exp84b iNat ext (uniform) | 0.918 | −0.014 |
 | v49 | AudioMAE blend foundation-swap | 0.910 | −0.022 |
 | v50 | M5 MLP non-Aves freeze | 0.905 | −0.027 |
+| v55 | + Tucker 5-fold SED linear W=0.10 | ≤0.932 | 0 (undersized dose) |
+| v56 | + Tucker rank-blend W=0.30 (no rescues) | 0.931 / 0.932 | 0 / −0.001 |
+| **v57** | **Mattia fork as-is (full stack with rescues)** | **0.941** | **+0.009** |
+| v58 | v33 + Tucker linear W=0.30 | ≤0.941 | ≤+0.009 |
+| v59 | v33 + Tucker linear W=0.40 | ≤0.941 | ≤+0.009 |
 
-**Recent +0.002/step trajectory (v46→v48)** under regression band: dedup + Aves freeze + cleaner teacher each contribute.
+**Production reset 2026-05-03**: v57 = LB 0.941 (kernel `mattia-fork`).
+v33 (kernel `perch-distill`) is now the legacy reference. Tucker SED swap
+is the +0.009 lever, not the rank+rescue architecture (verified by v58/v59
+linear blend reaching same ceiling). 14× macro_d gap between exp50 and
+Tucker (exp165 ablation, same architecture, same dose) — our exp50 mel-128
+fmax=14000 was missing the 14-16 kHz Insecta band that Tucker mel-256
+fmax=16000 captures.
 
 For invariants, failure modes, anti-patterns, and the locally-or-LB-verified-negative list, **see CLAUDE.md** — that is the single source of truth for strategic state. This README is the structural index only.

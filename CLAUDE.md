@@ -2,29 +2,56 @@
 
 Guidance for Claude Code in this repository.
 
-## CURRENT STATE (2026-05-03)
+## CURRENT STATE (2026-05-03 evening)
 
-**Production LB: v57 = 0.941** = direct fork of `mattiaangeli/birdclef-2026-0-943-better-blend`
-(Tucker 5-fold SED + ProtoSSM + rank-percentile blend + 3 rescue rules + adaptive
-smoothing). Slug: `ultimatumgame/birdclef-2026-mattia-fork`. v33 (0.932) is the
-prior baseline; superseded forward.
+**Production: v57 = LB 0.941**. Kernel `ultimatumgame/birdclef-2026-mattia-fork`
+(direct fork of `mattiaangeli/birdclef-2026-0-943-better-blend`). Stack:
+Perch v2 + ProtoSSM v4 + Tucker 5-fold SED + MLP probe (PCA-Perch) +
+rank-percentile blend + 3 rescue rules + adaptive smoothing + per-class
+threshold + file_max^0.4 rank-aware scaling.
 
-**Prior baseline (v33 = 0.932)** = `0.7 × (Perch+ProtoSSM_v4 ensemble) + 0.3 × exp50_SED + V9 taxon-gate + Gauss σ=0.5 + file-max α=0.10`. Still the production for `birdclef-2026-perch-distill` slug.
+**Local modular extract**: `notebooks/birdclef-2026-mattia-fork/lib/` —
+11 modules (config / data / perch / helpers / mlp_probe / rank_scale /
+protossm / pipeline / tucker_sed / final_blend) covering 2032 lines of
+the inference pipeline. Forward extensions live there.
 
-Notebook cells 41 (ProtoSSM v4 train) / 43 (ResidualSSM second-pass) /
-48 (score fusion) are part of the v33 pipeline — **ProtoSSM IS in v33**,
-contrary to earlier (incorrect) memory entries. The "0.7 × Perch_ONNX"
-shorthand referred to the Perch+ProtoSSM ensemble, not raw Perch alone.
+**Legacy: v33 = LB 0.932** (deprecated 2026-05-03). Kernel
+`ultimatumgame/birdclef-2026-perch-distill` retained for ablation
+reference and historical patches. Stack: `0.7 × (Perch+ProtoSSM) +
+0.3 × exp50_SED + V9 taxon-gate + Gauss σ=0.5 + file-max α=0.10`.
+**No new LB submissions to perch-distill kernel** unless explicitly
+ablating against v33.
 
-**Public 0.943 lever (2026-05-03)**: `mattiaangeli/birdclef-2026-0-943-better-blend`
-hits LB 0.943, +0.011 over our 0.932. Same ProtoSSM architecture; gap is:
-1. Tucker `bc2026-distilled-sed-public` 5-fold SED ensemble (mel-256,
-   fmin-20, fmax-16000, per-spec z-score) replacing our exp50 single.
-2. Rank-percentile blend in place of our linear `0.7 P + 0.3 SED`.
-3. 3 conditional rescue rules (fake_only, proto_continuity with t-dist
-   fat-tail kernel ±3 windows, sed_local_spike).
-See memory `project_0943_gap_analysis.md` for component-by-component
-breakdown and predicted +Δ per step.
+### v57 LB ladder (post-Mattia fork, 2026-05-03 UTC)
+| v | mod | LB Δ vs v57 | mechanism |
+|---|---|---|---|
+| v55 | v33 + Tucker linear W=0.10 | n/a (≤0.932) | undersized dose |
+| v56 | v33 + Tucker rank-blend W=0.30 | n/a (≤0.932) | rank tanks v33 calibration |
+| **v57** | **Mattia fork as-is** | **0** (= 0.941) | reference |
+| v58 | v33 + Tucker linear W=0.30 | ≤0 (≤0.941) | linear+v33 saturates at Tucker ceiling |
+| v59 | v33 + Tucker linear W=0.40 | ≤0 (≤0.941) | dose-up doesn't help |
+
+### What 0.941 ≠ 0.943 means
+Mattia's notebook page header says "best 0.943 V3" but the markdown body
+says "0.941 V1 confirmed". Our fork captured V1; V3 has minor hyperparam
+tweaks plus stochastic ProtoSSM training variance (~±0.002 per run).
+The 0.943 vs 0.941 gap is within in-kernel training noise.
+
+### Key learning from v55-v59 (component vs whole-pipeline)
+The +0.009 LB gap (v33 → v57) is **Tucker SED swap**, not the rank+
+rescue architecture. exp165 ablation: same architecture (linear W=0.30),
+swap streamB only:
+- streamB = exp50 → macro_d +0.008
+- streamB = Tucker_5fold → macro_d +0.117  (14× difference)
+
+Linear blend on calibrated v33 streamA outperforms rank-blend (sp_row
+0.991 vs 0.40). Mattia's rank+rescues exist because their streamA
+(raw Perch+ProtoSSM) is uncalibrated; our v33 doesn't need it.
+
+See memory entries:
+- `project_v57_mattia_fork_breakthrough.md` — v57 result + v58/v59 dose ceiling
+- `project_why_mattia_works.md` — corrected analysis (SED dominates)
+- `project_0943_gap_analysis.md` — component-by-component decomposition
 
 Pre-0.943-discovery lever audits remain valid: 17 distinct post-v33
 modifications regressed −0.002 to −0.018. The "lever exhaustion"
@@ -163,7 +190,10 @@ disown
 - `experiments/_archive_2025/`, `_archive_2026_*` — historical layers. Useful as negative-result reference (e.g., `_archive_2026_dpo_dead_end/` records ~10 RL/DPO variants that confirmed BCE is Bayes-optimal here).
 - `experiments/_data_pipelines/` — pseudo build, external download, refinement
 - `experiments/_audits_post_v26/` — post-v33 audits and ablations
-- `notebooks/` — Kaggle submission notebooks. Edit in place; **never create new dirs per variant**
+- `notebooks/` — Kaggle submission notebooks. **Two production-relevant kernels:**
+  - `birdclef-2026-mattia-fork/` — **PRODUCTION** (LB 0.941). Has `lib/` with 11 modules (modular extract of Mattia stack). Forward LB submissions go here.
+  - `birdclef-2026-perch-distill/` — **LEGACY v33 reference** (LB 0.932). `patches/` keeps history of v34-v59 attempts. No new LB submissions unless ablating against v33.
+  - `birdclef-2026-{exp10,exp20,exp20-to-exp30,test}-submission/` — early-2026 historical kernels, retained for reproducibility only.
 - `paper/` — CLEF 2026 working note (LaTeX). `experiments.tex` stale past exp39
 - `data/birdclef-2026/` — current comp data
 - `data/birdclef-2025/` — prior year (Pantanal, reusable as BG)

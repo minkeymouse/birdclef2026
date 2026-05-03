@@ -3317,3 +3317,78 @@ the late-fusion architecture is not the load-bearing source of the
 at v33 levels), then despite the local profile something specific
 to Mattia's stream-A composition (ProtoSSM-only, MLP probe, etc.)
 matters for LB transfer in a way the v33 streamA cannot reproduce.
+
+
+% =====================================================================
+% Section appended 2026-05-03 evening: production reset to v57 = 0.941
+% =====================================================================
+
+\section{Production reset: v57 = 0.941 (mattia-fork)}
+
+After the v55--v59 dose-response sweep, the production reference shifts
+from v33 = 0.932 (kernel \texttt{birdclef-2026-perch-distill}) to v57 =
+0.941 (kernel \texttt{birdclef-2026-mattia-fork}, a direct fork of
+\texttt{mattiaangeli/birdclef-2026-0-943-better-blend}). The v33 kernel
+is retained as a legacy ablation reference; no new LB submissions go
+to it unless explicitly anchored on v33.
+
+\subsection{The +0.009 ceiling and what determines it}
+
+v55, v56, v58, v59 all add Tucker SED to v33 in different fusion
+configurations. They reach LB scores that are bounded by the team-best
+0.941 (set by v57). The dose response saturates between $W{=}0.30$ and
+$W{=}0.40$ in linear blend; the rank-percentile-with-rescues
+architecture reaches the same ceiling. The conclusion is empirical:
+**the +0.009 LB delta is attributable to the Tucker SED itself**, not
+to the fusion architecture that consumes it.
+
+The local audit gap between exp50 and Tucker as the secondary stream
+in a controlled $W{=}0.30$ linear blend is $14\times$:
+$\Delta_{\text{exp50}}{=}+0.008$ vs.\ $\Delta_{\text{Tucker}}{=}+0.117$
+on macro\_d. This gap is concentrated in the non-Aves taxa, with
+Tucker giving $+0.168$ Insecta macro\_d delta vs.\ $+0.007$ for exp50.
+The mechanism is mel preprocessing: exp50's $f_{\max}{=}14{,}000$ Hz
+clips Insecta's typical 10--15 kHz harmonics, while Tucker's
+$f_{\max}{=}16{,}000$ Hz captures them.
+
+\subsection{0.941 vs.\ 0.943 (Mattia's V3)}
+
+Mattia's notebook page header reports 0.943 as the V3 best. The
+markdown body confirms 0.941 from V1. Our fork captured V1; the
+$\sim 0.002$ V1$\to$V3 gap is consistent with stochastic ProtoSSM
+training variance (random init + mixup + SWA averaging produce
+$\pm 0.001$--$0.002$ between runs at fixed hyperparameters) plus minor
+threshold tweaks. The 0.943 ceiling is therefore not a structurally
+distinct stack from 0.941; the same code sampled differently can land
+between 0.939 and 0.943.
+
+\subsection{Implications}
+
+Sustaining or exceeding 0.941 requires an orthogonal SED signal source
+that Tucker does not already provide. Three candidates of decreasing
+expected difficulty:
+
+\begin{enumerate}
+\item Train an in-house SED with mel=256, $f_{\min}{=}20$, $f_{\max}{=}16000$
+on the same train\_audio + 2025 BG mixing recipe as exp50, but with
+5-fold cross-validation. Pure preprocessing fix; no distillation
+(prior Perch-distill attempts amplified bird bias). $\sim 20$ hours
+GPU at 32 GB. Add as third rank-blend stream in mattia-fork.
+
+\item External non-Aves data (Watkins, Macaulay, AnuraSet) to train
+a secondary SED with explicit non-Aves supervision, addressing a
+class-imbalance failure mode that train\_audio's Aves-heavy
+distribution cannot.
+
+\item Hyperparameter tuning of the existing rescue rules
+(\texttt{PROTO\_CONT\_RANK\_THR}, \texttt{SED\_ONLY\_RANK\_THR}, etc.)
+on labeled-SS OOF; expected gain is on the order of stochastic
+variance, but cheap.
+\end{enumerate}
+
+The 0.941 baseline is a useful checkpoint, but the team rank trajectory
+(rank 451 at v33 $\to$ 289 at v57 $\to$ 307 at v59 as other teams
+pushed past us) shows the public LB is already commodity at 0.94+.
+The remaining lever family for top-100 LB is in-house SED training
+plus non-Aves data acquisition --- the same data engineering work that
+should have been done four months ago.
