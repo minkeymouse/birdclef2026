@@ -1,4 +1,15 @@
-# Experiments — Index (refreshed 2026-05-02)
+# Experiments — Index (refreshed 2026-05-03)
+
+> **Production: v57 = LB 0.941** — kernel `notebooks/birdclef-2026-mattia-fork/`.
+> Forward LB submissions go there; uses Tucker 5-fold SED + ProtoSSM +
+> rank-blend + 3 rescue rules. Local audit utilities in
+> `notebooks/birdclef-2026-mattia-fork/lib/` (5 self-contained modules:
+> paths, tucker_sed, rank_scale, helpers, final_blend).
+>
+> **Legacy: v33 = LB 0.932** — kernel `notebooks/birdclef-2026-perch-distill/`.
+> Most scripts in this index were built for v33; retained for ablation
+> reference. New experiments should evaluate against the v57 baseline.
+
 
 ```
 experiments/
@@ -32,9 +43,12 @@ Avoids the bash-pipe-buffer pitfall where `uv run python ... 2>&1 | tail -50` hi
 
 ## `_data_pipelines/`
 
-Scripts that build artifacts loaded by the Kaggle inference notebook (`notebooks/birdclef-2026-perch-distill/`). Caches large, gitignored.
+Scripts that build artifacts loaded by `notebooks/birdclef-2026-perch-distill/`
+(legacy v33 kernel). Caches large, gitignored. The current production
+(`notebooks/birdclef-2026-mattia-fork/`) only depends on the Tucker SED
+public dataset + Perch ONNX, not on these artifacts.
 
-### Active in v33 production (LB 0.932)
+### Active in v33 production (LB 0.932, legacy)
 
 | Script | Purpose | Output |
 |---|---|---|
@@ -107,14 +121,25 @@ Live diagnostic experiments after v33 production. Most pre-v33 audits archived t
 
 ```
 _audits_post_v26/
-├── _lib/                              shared utility module
+├── _lib/                              shared utility module (build_ss, evaluate, ...)
 ├── exp103_perch_head_finetune.py      P_NEW: Perch backbone frozen + 234-class head fine-tune
 ├── exp106_pnew_hybrid.py              Perch-init linear + correction MLP
 ├── exp108_failure_forensics.py        FN/FP analysis on 122 SS eval rows
-├── exp121b_score_eval.py              score exp121 + v44 blend audit
-├── exp123b_score_eval.py              score exp123 + v45 blend audit
+├── exp121b/123b/136b_score_eval.py    score v44/v45/v46 blend audits
 ├── exp124_freq_band_gate.py           frequency-band physics gate (no learning)
-├── exp136b_score_eval.py              score exp136b + v46 blend audit
+│
+│ === post-Mattia-fork ablations (2026-05-03) ===
+├── exp157_exp84b_nonaves_freeze.py    exp84b W=0.10 non-Aves freeze audit
+├── exp158_separation_poc.py           Demucs separation PoC (negative)
+├── exp159_score_eval.py               exp159 multi-region BG SED score eval
+├── exp160_tucker_sed_audit.py         Tucker 5-fold + various blend variants
+├── exp161_rank_blend_audit.py         rank-pct blend audit (sp_row collapse warning)
+├── exp162_full_mattia_stack.py        Mattia stack reproduction on labeled SS
+├── exp163_mattia_postproc_audit.py    rank-aware + adaptive smooth + isotonic
+├── exp164_rank_rescue_arch.py         rank+rescue architecture: was linear the bottleneck?
+├── exp165_definitive_ablation.py      controlled factor grid (SED × fusion × rescue)
+├── exp166_3stream_linear_audit.py     3-stream linear blend dose-up audit
+├── exp168_mattia_lib_sanity.py        regression test for mattia-fork lib/
 └── _outputs/                          per-script caches
 ```
 
