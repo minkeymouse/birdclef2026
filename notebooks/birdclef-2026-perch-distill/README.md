@@ -23,10 +23,11 @@ v33-anchored ablation. Forward production work uses
 
 ## Files
 
-- `notebook.ipynb` — production v33 notebook (currently has v59 patch
-  applied: linear v33 + Tucker W=0.40). Pushed as kernel
-  `ultimatumgame/birdclef-2026-perch-distill` v61. Reset to v33 base
-  if needed.
+- `notebook.ipynb` — legacy v33 reference notebook. **Currently has v59
+  patch applied** (linear v33 + Tucker W=0.40 in cell 50, between markers
+  `# ========== v59 Tucker linear W=0.40 patch BEGIN/END ==========`).
+  Pushed as kernel `ultimatumgame/birdclef-2026-perch-distill` v61.
+  To reset to clean v33: remove that block from cell 50.
 - `kernel-metadata.json` — Kaggle dataset / kernel declarations.
 - `patches/` — historical record of every LB-submitted modification.
   Each file is a code block that gets inserted into `notebook.ipynb`
