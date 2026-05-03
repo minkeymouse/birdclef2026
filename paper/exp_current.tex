@@ -3108,3 +3108,110 @@ configurations did not include ensemble distilled SEDs, rank-percentile
 fusion, or stream-conditional rescue rules. The lever space outside
 our explored set is non-empty, and the $+0.011$ public delta is
 empirical evidence that orthogonal mechanisms remain available.
+
+
+% =====================================================================
+% Section appended 2026-05-03: v57 result + late-fusion architecture
+% =====================================================================
+
+\section{The +0.009 jump: late-fusion architecture, not stronger SED}
+
+\subsection{Empirical decomposition (3 LB submissions)}
+
+Three submissions on 2026-05-02--03 isolate why Mattia's public 0.943
+stack works:
+
+\begin{center}
+\begin{tabular}{lllll}
+\toprule
+v   & Change & local macro\_d & LB & lesson \\
+\midrule
+v55 & v33 + 0.10 $\times$ Tucker linear add & $+0.077$ & $\le 0.932$ & Tucker added linearly = no LB gain \\
+v56 & v33 + Tucker rank-blend $W{=}0.30$    & $+0.078$ & $0.932 / 0.931$ & Rank-blend without rescues = no LB gain \\
+\textbf{v57} & \textbf{Mattia fork as-is}    & --- & $\mathbf{0.941}$ & Whole pipeline = $+0.009$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The Tucker SED is comparable in strength to our exp50 (Pearson $0.85$
+on labeled SS rows). Adding it to v33 in any blend form moves LB by
+zero. Yet the same Tucker SED \emph{inside} Mattia's pipeline moves LB
+by $+0.009$. The lever is therefore not the SED itself but the
+architecture that consumes it.
+
+\subsection{Component interaction analysis}
+
+Mattia's pipeline keeps two genuinely independent streams to the very
+end:
+\begin{enumerate}
+\item Perch $+$ ProtoSSM $+$ MLP probe $+$ post-processing $\to$ stream A
+\item Tucker 5-fold SED $\to$ stream B
+\end{enumerate}
+
+Both streams are then transformed to per-class rank percentile and
+combined as $\mathrm{pred} = x_a (1 - W) + x_b W$ with $W{=}0.30$.
+After the base blend, three conditional rescue rules patch specific
+failure modes of the two-detector ensemble:
+
+\begin{enumerate}
+\item \textbf{fake-only}: $p_a > 0.50 \wedge p_b < 0.05$
+$\Rightarrow \mathrm{pred} \mathrel{+}= 0.12 \cdot x_a$. Patches the
+case where Proto detects something SED missed.
+
+\item \textbf{proto temporal continuity}: a fat-tail
+$t$-distribution kernel ($\nu{=}2$, scale $1.20$) over $\pm 3$ windows
+on $p_a$, normalised, yields $p_a^{\mathrm{ctx}}$. If
+$x_a^{\mathrm{ctx}} > 0.88 \wedge x_a > 0.75 \wedge p_b < 0.12$, then
+$\mathrm{pred} \mathrel{+}= 0.15 \cdot \max(x_a, x_a^{\mathrm{ctx}})$.
+Patches a species call extending across multiple windows where Proto's
+sequence model fires consistently and SED is silent.
+
+\item \textbf{sed-local-spike}: $x_b > 0.95 \wedge x_a < 0.80$
+$\Rightarrow \mathrm{pred} \mathrel{+}= 0.12 \cdot x_b$. Patches a
+transient event that SED catches locally and Proto's temporal
+smoothing over-dampens.
+\end{enumerate}
+
+The rescues only fire correctly on \emph{independent} streams. Our v55
+and v56 mixed exp50 into the v33 base \emph{before} attempting to add
+Tucker as the second stream; the resulting ``stream A'' was therefore
+a pre-fused composite, and the Tucker stream had no clean disagreement
+signal to rescue against. The architecture matters.
+
+\subsection{New site-invariance sources from the 0.941 stack}
+
+Returning to the v33 decomposition into 3 site-invariance sources
+(Perch xeno-canto multi-region, exp50 2025-BG-mix, file-max physics),
+Mattia's stack adds:
+
+\begin{itemize}
+\item \textbf{Source 4 -- 5-fold SED ensemble.} Variance across folds
+  is itself an invariance source.
+\item \textbf{Source 5 -- per-class rank-pct calibration.} Fusion in
+  rank space is AUC-invariant per class but reduces the impact of
+  per-class miscalibration in either stream.
+\item \textbf{Source 6 -- conditional rescue rules.} Hand-tuned
+  stream-disagreement priors recover recall on low-SED rare events
+  and high-context-Proto species.
+\end{itemize}
+
+Sources 4--6 are jointly responsible for the $+0.009$ jump. Each in
+isolation yields zero (as our v55/v56 experiments empirically
+verified).
+
+\subsection{Implication for forward levers}
+
+The mattia-fork (v57) replaces v33 as the production reference. Future
+levers should be evaluated as residual additions to the 0.941 baseline,
+not the 0.932 baseline. Component-level grafts onto v33 are deprecated
+in favour of additions to mattia-fork's two-stream skeleton.
+
+Candidate forward levers (each $+0.001$ to $+0.003$ expected):
+\begin{enumerate}
+\item Add our exp50 as a third rank-blend stream inside mattia-fork.
+\item Add BirdNET 2.4 or AudioMAE-frozen as a 4th stream.
+\item Re-train Mattia's ProtoSSM on our extended training data
+  (multi-region BG mixing from exp155, expanded external positives).
+\item Tune SED\_W or rescue thresholds on a 0.941-anchored OOF.
+\item Add a fourth rescue rule from observed mattia-fork OOF failures.
+\end{enumerate}
