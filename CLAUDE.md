@@ -4,7 +4,12 @@ Guidance for Claude Code in this repository.
 
 ## CURRENT STATE (2026-05-03)
 
-**Production LB: v33 = 0.932** = `0.7 × (Perch+ProtoSSM_v4 ensemble) + 0.3 × exp50_SED + V9 taxon-gate + Gauss σ=0.5 + file-max α=0.10`.
+**Production LB: v57 = 0.941** = direct fork of `mattiaangeli/birdclef-2026-0-943-better-blend`
+(Tucker 5-fold SED + ProtoSSM + rank-percentile blend + 3 rescue rules + adaptive
+smoothing). Slug: `ultimatumgame/birdclef-2026-mattia-fork`. v33 (0.932) is the
+prior baseline; superseded forward.
+
+**Prior baseline (v33 = 0.932)** = `0.7 × (Perch+ProtoSSM_v4 ensemble) + 0.3 × exp50_SED + V9 taxon-gate + Gauss σ=0.5 + file-max α=0.10`. Still the production for `birdclef-2026-perch-distill` slug.
 
 Notebook cells 41 (ProtoSSM v4 train) / 43 (ResidualSSM second-pass) /
 48 (score fusion) are part of the v33 pipeline — **ProtoSSM IS in v33**,
