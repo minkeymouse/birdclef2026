@@ -51,20 +51,35 @@ ablation reference only.
 
 ## Module map (`lib/`)
 
+**Self-contained, locally importable** (use these for audits and forward work):
+
 | module | role | source cell(s) |
 |---|---|---|
-| `config.py` | CFG dict, SR=32000, N_WINDOWS=12, N_CLASSES=234 | 5 |
+| `paths.py` | Kaggle-vs-local path resolution (TUCKER_DIR, PERCH_ONNX, etc) | (new) |
+| `tucker_sed.py` | Tucker 5-fold ONNX SED — `load_5fold()`, `predict_file()`, `predict_files()` | 37 |
+| `rank_scale.py` | `rank_aware_scale`, `adaptive_delta_smooth`, `file_max_blend` (+ groupby variants for variable-window labeled SS) | 24-25 |
+| `helpers.py` | `macro_auc_skip_empty`, `per_class_auc`, `gauss_smooth_windows`, per-taxon temperature | 15-19 |
+| `final_blend.py` | `rank_pct`, `mattia_blend` (configurable rescue subset), `linear_blend` | 39 |
+
+Verified by `experiments/_audits_post_v26/exp168_mattia_lib_sanity.py`:
+tucker_sed reproduces cached scores 36/36 exact match; final_blend
+reproduces v58 (+0.117), mattia full-rescues (+0.087), no-rescues
+(+0.078) numbers exactly.
+
+**Source-dump modules** (need Kaggle-cell context; not yet self-contained):
+
+| module | role | source cell(s) |
+|---|---|---|
+| `config.py` | CFG dict, runtime constants | 5 |
 | `data.py` | taxonomy + sample submission + train SS labels | 7 |
 | `perch.py` | Perch v2 ONNX loader + window-level inference | 9, 10, 12, 13 |
-| `helpers.py` | metric, smoothing, prior table, file-scale, taxon T | 15-19 |
 | `mlp_probe.py` | PCA-Perch MLP probe + isotonic calibration | 21-23 |
-| `rank_scale.py` | file_max^0.4 + adaptive δ smoothing | 24-25 |
-| `protossm.py` | LightProtoSSM + ResidualSSM | 27, 29 |
+| `protossm.py` | LightProtoSSM + ResidualSSM (training) | 27, 29 |
 | `pipeline.py` | OOF + full inference orchestration | 30, 31, 33, 35 |
-| `tucker_sed.py` | Tucker 5-fold ONNX SED | 37 |
-| `final_blend.py` | rank-pct blend + 3 rescues | 39 |
 
-Total: 2032 lines.
+These are textual extracts; running them outside the notebook requires
+proper standalone refactor (TODO: extract Kaggle-only paths, fix
+imports, isolate state dependencies).
 
 ## Forward extension procedure
 
